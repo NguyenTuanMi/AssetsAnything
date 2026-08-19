@@ -32,11 +32,11 @@
 
   body {
     display: grid;
-    grid-template-columns: 340px 1fr;
+    grid-template-columns: 340px 1fr 300px;
     grid-template-rows: 56px 1fr;
     grid-template-areas:
-      "header header"
-      "sidebar viewer";
+      "header header header"
+      "sidebar viewer info";
     height: 100vh;
     overflow: hidden;
   }
@@ -82,6 +82,109 @@
     display: flex;
     flex-direction: column;
     gap: 20px;
+  }
+
+  .mode-toggle {
+    display: flex;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 3px;
+  }
+  .mode-toggle button {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-family: var(--sans);
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .mode-toggle button.active {
+    background: var(--accent);
+    color: #0c1512;
+  }
+
+  textarea.prompt-input {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px;
+    border-radius: 6px;
+    font-family: var(--sans);
+    font-size: 13px;
+    resize: vertical;
+    min-height: 70px;
+  }
+  textarea.prompt-input:focus { outline: none; border-color: var(--accent); }
+
+  .secondary-btn {
+    width: 100%;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .secondary-btn:hover { border-color: var(--accent); }
+  .secondary-btn:disabled { color: var(--text-dim); cursor: not-allowed; }
+
+  .clarify-box {
+    border: 1px solid var(--accent-dim);
+    background: #182420;
+    border-radius: 10px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .clarify-question {
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .clarify-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .clarify-chip {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 11.5px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .clarify-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+  .resolved-box {
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .resolved-box .label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+  }
+  .resolved-box .value {
+    font-size: 13px;
+    color: var(--text);
   }
 
   .field-label {
@@ -261,6 +364,100 @@
     display: none;
   }
   .download-link:hover { background: var(--accent-dim); }
+
+  #info-panel {
+    grid-area: info;
+    border-left: 1px solid var(--border);
+    background: var(--panel);
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  #info-panel h2 {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin: 0;
+  }
+
+  .dim-empty {
+    font-size: 12.5px;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  .dim-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .dim-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  .dim-row .axis {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+  }
+
+  .axis-chip {
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: #0c1512;
+  }
+  .axis-chip.x { background: #e6725e; }
+  .axis-chip.y { background: #5ee6c2; }
+  .axis-chip.z { background: #6ea6e6; }
+
+  .dim-row .value {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .dim-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 2px 0;
+  }
+
+  .dim-summary {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-dim);
+    line-height: 1.7;
+  }
+  .dim-summary b { color: var(--text); font-weight: 500; }
+
+  .units-note {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.6;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
 </style>
 </head>
 <body>
@@ -276,26 +473,71 @@
     <input id="server-url" type="text" value="http://localhost:8000" />
   </div>
 
-  <div>
+  <div class="mode-toggle">
+    <button id="mode-upload-btn" class="active">Upload images</button>
+    <button id="mode-prompt-btn">Describe with prompt</button>
+  </div>
+
+  <!-- ===== Upload-mode UI (existing flow) ===== -->
+  <div id="upload-mode">
     <label class="field-label">Images</label>
     <div id="dropzone" class="dropzone">
       <p><strong>Click to upload</strong> or drag images here</p>
       <p style="margin-top:4px;">Multiple angles of the same object work best</p>
     </div>
     <input id="file-input" type="file" accept="image/*" multiple />
+
+    <div id="thumbs" class="thumbs" style="margin-top:12px;"></div>
+
+    <div style="margin-top:14px;">
+      <label class="field-label">Fusion mode</label>
+      <select id="algo-select">
+        <option value="stochastic">Stochastic (sharper detail)</option>
+        <option value="multidiffusion">Multidiffusion (more consistent)</option>
+      </select>
+    </div>
+
+    <button id="run-btn" class="run-btn" disabled style="margin-top:14px;">Upload images to begin</button>
   </div>
 
-  <div id="thumbs" class="thumbs"></div>
+  <!-- ===== Prompt-mode UI (new flow) ===== -->
+  <div id="prompt-mode" style="display:none; flex-direction: column; gap: 16px;">
+    <div>
+      <label class="field-label">Describe the object</label>
+      <textarea id="prompt-input" class="prompt-input" placeholder="e.g. Nike Air Jordan 1 Retro High OG, or 'a mid-century wooden dining chair'"></textarea>
+    </div>
 
-  <div>
-    <label class="field-label">Fusion mode</label>
-    <select id="algo-select">
-      <option value="stochastic">Stochastic (sharper detail)</option>
-      <option value="multidiffusion">Multidiffusion (more consistent)</option>
-    </select>
+    <button id="interpret-btn" class="secondary-btn">Interpret prompt</button>
+
+    <div id="clarify-box" class="clarify-box" style="display:none">
+      <div class="clarify-question" id="clarify-question"></div>
+      <div class="clarify-chips" id="clarify-chips"></div>
+      <input id="clarify-answer" type="text" placeholder="Type your answer…" />
+      <button id="clarify-submit-btn" class="secondary-btn">Submit answer</button>
+    </div>
+
+    <div id="resolved-box" class="resolved-box" style="display:none">
+      <div>
+        <div class="label">Resolved object</div>
+        <div class="value" id="resolved-object">—</div>
+      </div>
+      <div>
+        <div class="label">Search query</div>
+        <div class="value" id="resolved-query">—</div>
+      </div>
+    </div>
+
+    <div style="display:none" id="prompt-algo-wrap">
+      <label class="field-label">Fusion mode</label>
+      <select id="prompt-algo-select">
+        <option value="stochastic">Stochastic (sharper detail)</option>
+        <option value="multidiffusion">Multidiffusion (more consistent)</option>
+      </select>
+    </div>
+
+    <button id="prompt-generate-btn" class="run-btn" style="display:none">Generate 3D Model</button>
   </div>
 
-  <button id="run-btn" class="run-btn" disabled>Upload images to begin</button>
   <div id="log" class="log"></div>
 </aside>
 
@@ -327,6 +569,40 @@
   </div>
 </main>
 
+<div id="info-panel">
+  <h2>Bounding box</h2>
+  <div id="dim-empty" class="dim-empty">Generate a model to see its bounding-box dimensions here.</div>
+
+  <div id="dim-content" style="display:none">
+    <div class="dim-grid">
+      <div class="dim-row">
+        <span class="axis"><span class="axis-chip x">X</span>Width</span>
+        <span class="value" id="dim-x">—</span>
+      </div>
+      <div class="dim-row">
+        <span class="axis"><span class="axis-chip y">Y</span>Height</span>
+        <span class="value" id="dim-y">—</span>
+      </div>
+      <div class="dim-row">
+        <span class="axis"><span class="axis-chip z">Z</span>Depth</span>
+        <span class="value" id="dim-z">—</span>
+      </div>
+    </div>
+
+    <div class="dim-divider"></div>
+
+    <div class="dim-summary">
+      diagonal &nbsp;<b id="dim-diag">—</b><br/>
+      min corner &nbsp;<b id="dim-min">—</b><br/>
+      max corner &nbsp;<b id="dim-max">—</b>
+    </div>
+
+    <div class="units-note" id="dim-units">
+      Values are in normalized model-space units, not real-world measurements — TRELLIS doesn't infer true physical scale from images alone.
+    </div>
+  </div>
+</div>
+
 <script>
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('file-input');
@@ -342,6 +618,214 @@ const toolbar = document.getElementById('viewer-toolbar');
 const toggleRotateBtn = document.getElementById('toggle-rotate');
 const resetCamBtn = document.getElementById('reset-cam');
 const algoSelect = document.getElementById('algo-select');
+
+const dimEmpty = document.getElementById('dim-empty');
+const dimContent = document.getElementById('dim-content');
+const dimX = document.getElementById('dim-x');
+const dimY = document.getElementById('dim-y');
+const dimZ = document.getElementById('dim-z');
+const dimDiag = document.getElementById('dim-diag');
+const dimMin = document.getElementById('dim-min');
+const dimMax = document.getElementById('dim-max');
+const dimUnits = document.getElementById('dim-units');
+
+// ----- Mode toggle -----
+const modeUploadBtn = document.getElementById('mode-upload-btn');
+const modePromptBtn = document.getElementById('mode-prompt-btn');
+const uploadModeEl = document.getElementById('upload-mode');
+const promptModeEl = document.getElementById('prompt-mode');
+
+function setMode(mode) {
+  const isUpload = mode === 'upload';
+  modeUploadBtn.classList.toggle('active', isUpload);
+  modePromptBtn.classList.toggle('active', !isUpload);
+  uploadModeEl.style.display = isUpload ? 'block' : 'none';
+  promptModeEl.style.display = isUpload ? 'none' : 'flex';
+  setLog('');
+}
+modeUploadBtn.addEventListener('click', () => setMode('upload'));
+modePromptBtn.addEventListener('click', () => setMode('prompt'));
+
+// ----- Prompt mode -----
+const promptInput = document.getElementById('prompt-input');
+const interpretBtn = document.getElementById('interpret-btn');
+const clarifyBox = document.getElementById('clarify-box');
+const clarifyQuestion = document.getElementById('clarify-question');
+const clarifyChips = document.getElementById('clarify-chips');
+const clarifyAnswer = document.getElementById('clarify-answer');
+const clarifySubmitBtn = document.getElementById('clarify-submit-btn');
+const resolvedBox = document.getElementById('resolved-box');
+const resolvedObject = document.getElementById('resolved-object');
+const resolvedQuery = document.getElementById('resolved-query');
+const promptAlgoWrap = document.getElementById('prompt-algo-wrap');
+const promptAlgoSelect = document.getElementById('prompt-algo-select');
+const promptGenerateBtn = document.getElementById('prompt-generate-btn');
+
+let qaHistory = [];
+let resolvedResult = null; // holds the final {search_query, search_filters, ...} once resolved
+
+function resetPromptFlow() {
+  qaHistory = [];
+  resolvedResult = null;
+  clarifyBox.style.display = 'none';
+  resolvedBox.style.display = 'none';
+  promptAlgoWrap.style.display = 'none';
+  promptGenerateBtn.style.display = 'none';
+  clarifyAnswer.value = '';
+}
+
+async function callRewritePrompt() {
+  const res = await fetch(`${serverUrl()}/rewrite_prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt: promptInput.value.trim(),
+      qa_history: qaHistory,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Server returned ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
+function showClarification(data) {
+  clarifyBox.style.display = 'flex';
+  clarifyQuestion.textContent = data.clarification_question || 'Could you clarify what you mean?';
+
+  clarifyChips.innerHTML = '';
+  (data.candidate_interpretations || []).forEach(opt => {
+    const chip = document.createElement('button');
+    chip.className = 'clarify-chip';
+    chip.textContent = opt;
+    chip.onclick = () => {
+      clarifyAnswer.value = opt;
+    };
+    clarifyChips.appendChild(chip);
+  });
+}
+
+function showResolved(data) {
+  resolvedResult = data;
+  clarifyBox.style.display = 'none';
+  resolvedBox.style.display = 'flex';
+  resolvedObject.textContent = data.object_name || '—';
+  resolvedQuery.textContent = data.search_query || '—';
+  promptAlgoWrap.style.display = 'block';
+  promptGenerateBtn.style.display = 'block';
+}
+
+interpretBtn.addEventListener('click', async () => {
+  if (!promptInput.value.trim()) return;
+  resetPromptFlow();
+  interpretBtn.disabled = true;
+  setLog('Interpreting prompt…');
+
+  try {
+    const data = await callRewritePrompt();
+    if (data.classification === 'needs_clarification') {
+      showClarification(data);
+      setLog('Please answer the question below to continue.');
+    } else {
+      showResolved(data);
+      setLog(`Interpreted as a ${data.classification.replace('_', ' ')}.`, 'ok');
+    }
+  } catch (err) {
+    setLog(`Failed: ${err.message}`, 'error');
+  } finally {
+    interpretBtn.disabled = false;
+  }
+});
+
+clarifySubmitBtn.addEventListener('click', async () => {
+  if (!clarifyAnswer.value.trim()) return;
+  clarifySubmitBtn.disabled = true;
+  setLog('Refining…');
+
+  qaHistory.push({
+    question: clarifyQuestion.textContent,
+    answer: clarifyAnswer.value.trim(),
+  });
+  clarifyAnswer.value = '';
+
+  try {
+    const data = await callRewritePrompt();
+    if (data.classification === 'needs_clarification') {
+      showClarification(data);
+      setLog('Please answer the question below to continue.');
+    } else {
+      showResolved(data);
+      setLog(`Interpreted as a ${data.classification.replace('_', ' ')}.`, 'ok');
+    }
+  } catch (err) {
+    setLog(`Failed: ${err.message}`, 'error');
+  } finally {
+    clarifySubmitBtn.disabled = false;
+  }
+});
+
+promptGenerateBtn.addEventListener('click', async () => {
+  if (!resolvedResult || !resolvedResult.search_query) return;
+
+  promptGenerateBtn.disabled = true;
+  promptGenerateBtn.textContent = 'Searching & generating… this can take a minute';
+  setLog('Scraping reference images and running TRELLIS on the remote server…');
+  renderDimensions(null);
+
+  try {
+    const res = await fetch(`${serverUrl()}/search_and_generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        search_query: resolvedResult.search_query,
+        prefer_shopping_results: !!(resolvedResult.search_filters && resolvedResult.search_filters.prefer_shopping_results),
+        multiimage_algo: promptAlgoSelect.value,
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Server returned ${res.status}: ${text}`);
+    }
+
+    const data = await res.json();
+    const modelUrl = `${serverUrl()}${data.download_url}`;
+
+    viewer.src = modelUrl;
+    viewer.style.display = 'block';
+    emptyState.style.display = 'none';
+    toolbar.style.display = 'flex';
+    downloadLink.href = modelUrl;
+    downloadLink.style.display = 'inline-block';
+
+    renderDimensions(data.dimensions);
+    setLog(`Model generated from ${data.num_images_used} scraped image(s).`, 'ok');
+  } catch (err) {
+    setLog(`Failed: ${err.message}`, 'error');
+  } finally {
+    promptGenerateBtn.disabled = false;
+    promptGenerateBtn.textContent = 'Generate 3D Model';
+  }
+});
+
+function renderDimensions(dims) {
+  if (!dims) {
+    dimEmpty.style.display = 'block';
+    dimContent.style.display = 'none';
+    return;
+  }
+  dimEmpty.style.display = 'none';
+  dimContent.style.display = 'block';
+
+  dimX.textContent = dims.width_x.toFixed(3);
+  dimY.textContent = dims.height_y.toFixed(3);
+  dimZ.textContent = dims.depth_z.toFixed(3);
+  dimDiag.textContent = dims.diagonal.toFixed(3);
+  dimMin.textContent = `[${dims.min_corner.map(v => v.toFixed(2)).join(', ')}]`;
+  dimMax.textContent = `[${dims.max_corner.map(v => v.toFixed(2)).join(', ')}]`;
+  if (dims.units) dimUnits.textContent = dims.units.replace(/^./, c => c.toUpperCase()) + '.';
+}
 
 let files = [];
 
@@ -418,6 +902,7 @@ runBtn.addEventListener('click', async () => {
   runBtn.disabled = true;
   runBtn.textContent = 'Generating… this can take a minute';
   setLog('Uploading images and running TRELLIS on the remote server…');
+  renderDimensions(null);
 
   const form = new FormData();
   files.forEach(f => form.append('images', f));
@@ -442,6 +927,8 @@ runBtn.addEventListener('click', async () => {
     toolbar.style.display = 'flex';
     downloadLink.href = modelUrl;
     downloadLink.style.display = 'inline-block';
+
+    renderDimensions(data.dimensions);
 
     setLog('Model generated successfully.', 'ok');
   } catch (err) {
