@@ -1,0 +1,3 @@
+[submodule "submodules/TRELLIS"]
+	path = submodules/TRELLIS
+	url = https://github.com/NguyenTuanMi/TRELLIS.git
