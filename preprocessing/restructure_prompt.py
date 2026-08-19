@@ -56,7 +56,7 @@ Rules:
    product photography in general (not a specific SKU), and flag that this
    request is lower-confidence for multi-view consistency — downstream
    filtering should be stricter and single-image fallback should be
-   preferred over multi-image fusion.
+   preferred over multi-image fusion. 
 
 6. Never include scene/context words from the original prompt (locations,
    backgrounds, other objects, activities). Strip these entirely.
@@ -76,6 +76,54 @@ Rules:
   }},
   "confidence": "high" | "medium" | "low"
 }}
+
+Field-by-field meaning, and when each one is allowed to be null:
+ 
+- "classification": which of the three routing outcomes applies to this
+  request. Every other field's requiredness depends on this value.
+ 
+- "clarification_question": ONLY used when classification is
+  "needs_clarification". A single, specific question that would let you
+  proceed if answered. Must be null for "specific_product" and
+  "generic_concept" — the request is already concrete enough, so there is
+  nothing left to ask.
+ 
+- "candidate_interpretations": ONLY used when classification is
+  "needs_clarification". 2-3 short example objects the user might have
+  meant, so they can pick one instead of typing free text. Must be null
+  for "specific_product" and "generic_concept".
+ 
+- "object_name": REQUIRED (must be a real string, never null) whenever
+  classification is "specific_product" OR "generic_concept". This is your
+  own best concrete description of the object — for "specific_product"
+  it is the exact product name; for "generic_concept" it is YOUR
+  disambiguated guess (e.g. "wooden dining chair with spindle back"), not
+  a placeholder. Only null when classification is "needs_clarification",
+  since by definition you don't have a concrete object yet.
+ 
+- "search_query": REQUIRED (must be a real string, never null) whenever
+  classification is "specific_product" OR "generic_concept" — this is the
+  actual text that will be sent to an image search engine, so a missing
+  or null value means the pipeline has nothing to search for and the
+  request fails outright. Only null when classification is
+  "needs_clarification".
+ 
+- "search_filters": REQUIRED (a populated object, never null) whenever
+  classification is "specific_product" OR "generic_concept". Only null
+  when classification is "needs_clarification".
+ 
+- "confidence": your own calibrated confidence that object_name and
+  search_query will retrieve correct, consistent images. Always required,
+  regardless of classification.
+ 
+IMPORTANT: "generic_concept" is NOT the same as "needs_clarification".
+"generic_concept" means you were ABLE to resolve the request into one
+concrete, searchable object on your own (rule 2 says do this whenever
+possible) — object_name and search_query must be filled in just as
+completely as they would be for "specific_product". Only fall back to
+"needs_clarification" (with those fields left null) when the request is
+too ambiguous for you to confidently pick a single concrete
+interpretation yourself.
 
 Example Input: "a red vintage car in front of a house"
 Example Output:
@@ -113,13 +161,133 @@ Example Output:
   "confidence": "high"
 }}
 
+Example Input: "IKEA Poäng armchair"
+Example Output:
+{{
+  "classification": "specific_product",
+  "clarification_question": null,
+  "candidate_interpretations": null,
+  "object_name": "IKEA Poäng armchair",
+  "search_query": "IKEA Poäng armchair product photo studio shot",
+  "search_filters": {{"prefer_shopping_results": true, "min_resolution": "large", "background": "isolated"}},
+  "confidence": "high"
+}}
+
+Example Input: "a Fender Stratocaster in sunburst finish"
+Example Output:
+{{
+  "classification": "specific_product",
+  "clarification_question": null,
+  "candidate_interpretations": null,
+  "object_name": "Fender Stratocaster, sunburst finish",
+  "search_query": "Fender Stratocaster sunburst product photo studio shot",
+  "search_filters": {{"prefer_shopping_results": true, "min_resolution": "large", "background": "isolated"}},
+  "confidence": "high"
+}}
+
+Example Input: "DeWalt 20V cordless drill"
+Example Output:
+{{
+  "classification": "specific_product",
+  "clarification_question": null,
+  "candidate_interpretations": null,
+  "object_name": "DeWalt 20V cordless drill",
+  "search_query": "DeWalt 20V cordless drill product photo studio shot",
+  "search_filters": {{"prefer_shopping_results": true, "min_resolution": "large", "background": "isolated"}},
+  "confidence": "high"
+}}
+
+Example Input: "a cast iron skillet"
+Example Output:
+{{
+  "classification": "generic_concept",
+  "clarification_question": null,
+  "candidate_interpretations": null,
+  "object_name": "cast iron skillet",
+  "search_query": "cast iron skillet product photo isolated white background",
+  "search_filters": {{"prefer_shopping_results": false, "min_resolution": "large", "background": "isolated"}},
+  "confidence": "medium"
+}}
+
+Example Input: "a leather messenger bag for work"
+Example Output:
+{{
+  "classification": "generic_concept",
+  "clarification_question": null,
+  "candidate_interpretations": null,
+  "object_name": "leather messenger bag",
+  "search_query": "leather messenger bag product photo isolated studio shot",
+  "search_filters": {{"prefer_shopping_results": false, "min_resolution": "large", "background": "isolated"}},
+  "confidence": "medium"
+}}
+
+Example Input: "an old rotary telephone sitting on a wooden desk"
+Example Output:
+{{
+  "classification": "generic_concept",
+  "clarification_question": null,
+  "candidate_interpretations": null,
+  "object_name": "vintage rotary telephone",
+  "search_query": "vintage rotary telephone product photo isolated",
+  "search_filters": {{"prefer_shopping_results": false, "min_resolution": "large", "background": "isolated"}},
+  "confidence": "medium"
+}}
+
+Example Input: "a small potted succulent plant"
+Example Output:
+{{
+  "classification": "generic_concept",
+  "clarification_question": null,
+  "candidate_interpretations": null,
+  "object_name": "potted succulent plant",
+  "search_query": "potted succulent plant product photo isolated white background",
+  "search_filters": {{"prefer_shopping_results": false, "min_resolution": "large", "background": "isolated"}},
+  "confidence": "medium"
+}}
+
+Example Input: "a knife"
+Example Output:
+{{
+  "classification": "needs_clarification",
+  "clarification_question": "What kind of knife did you have in mind — a kitchen chef's knife, a pocket/folding knife, a hunting knife, or something else?",
+  "candidate_interpretations": ["kitchen chef's knife", "folding pocket knife", "hunting knife"],
+  "object_name": null,
+  "search_query": null,
+  "search_filters": null,
+  "confidence": "low"
+}}
+
+Example Input: "a lamp"
+Example Output:
+{{
+  "classification": "needs_clarification",
+  "clarification_question": "What style of lamp are you picturing — a desk lamp, a floor lamp, or a hanging pendant light?",
+  "candidate_interpretations": ["modern desk lamp", "standing floor lamp", "hanging pendant light"],
+  "object_name": null,
+  "search_query": null,
+  "search_filters": null,
+  "confidence": "low"
+}}
+
+Example Input: "a running shoe, something lightweight for a marathon"
+Example Output:
+{{
+  "classification": "generic_concept",
+  "clarification_question": null,
+  "candidate_interpretations": null,
+  "object_name": "lightweight marathon running shoe",
+  "search_query": "lightweight marathon running shoe product photo isolated",
+  "search_filters": {{"prefer_shopping_results": false, "min_resolution": "large", "background": "isolated"}},
+  "confidence": "medium"
+}}
+
 Here is the user input: {user_input:}
 """
 
 @dataclass
 class PromptResult:
     classification: str
-    question: Optional[str] = None
+    clarification_question: Optional[str] = None
     candidate_interpretations: Optional[list[str]] = None
     object_name: Optional[str] = None
     search_query: Optional[str] = None
@@ -192,17 +360,18 @@ def build_user_input(original_prompt: str, qa_history: list[dict] | None = None)
 
 def rewrite_prompt(
     user_prompt: str,
-    vlm_base_url: str = "http://localhost:8000/v1",
-    vlm_model: str = "qwen2.5-vl-7b-instruct",
+    vlm_base_url: str = "http://localhost:9000/v1",
+    vlm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct",
     vlm_api_key: str = "not-needed",
 ) -> PromptResult:
     """
-    Calling for prompt rewriting to Qwen2.5-vl-7b-instruct
+    Calling for prompt rewriting to Qwen/Qwen2.5-VL-7B-Instruct
     """
 
     prompt = SYSTEM_PROMPT.format(user_input=user_prompt,)
     try:
         parsed = _call_vlm(prompt, vlm_base_url, vlm_model, vlm_api_key)
+        print("[Restructure Prompt] The rewritten prompt:", parsed)
         classification = str(parsed.get("classification", "unknown")).lower().replace(" ", "_")
         question = str(parsed.get("question", "unknown")).lower().replace(" ", "_")
         candidate_interpretations = str(parsed.get("candidate_interpretations", "unknown")).lower()
@@ -216,7 +385,7 @@ def rewrite_prompt(
 
     return PromptResult(
         classification=classification,
-        question=question,
+        clarification_question=question,
         candidate_interpretations=candidate_interpretations,
         object_name=object_name,
         search_query=search_query,
@@ -227,8 +396,8 @@ def rewrite_prompt(
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Restructering prompts via VLM.")
-    parser.add_argument("--vlm_base_url", type=str, default="http://localhost:8000/v1")
-    parser.add_argument("--vlm_model", type=str, default="qwen2.5-vl-7b-instruct")
+    parser.add_argument("--vlm_base_url", type=str, default="http://localhost:9000/v1")
+    parser.add_argument("--vlm_model", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct")
     parser.add_argument("--report_json", type=str, default=None)
     args = parser.parse_args()
 
