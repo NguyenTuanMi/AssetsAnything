@@ -82,12 +82,12 @@ def google_lens_identify(image_url: str, serpapi_key: str) -> Optional[str]:
         log.warning(f"Google Lens call failed for {image_url}: {e}")
         return None
 
-    # SerpApi's google_lens response varies by result type; check the
-    # likely places for a title in priority order.
-    for key in ("knowledge_graph",):
-        kg = results.get(key)
-        if kg and isinstance(kg, list) and kg[0].get("title"):
-            return kg[0]["title"]
+    # # SerpApi's google_lens response varies by result type; check the
+    # # likely places for a title in priority order.
+    # for key in ("knowledge_graph",):
+    #     kg = results.get(key)
+    #     if kg and isinstance(kg, list) and kg[0].get("title"):
+    #         return kg[0]["title"]
 
     visual_matches = results.get("visual_matches", [])
     if visual_matches and visual_matches[0].get("title"):

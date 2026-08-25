@@ -53,15 +53,15 @@ def clip_relevance_scores(images: list[Image.Image], query_text: str) -> Optiona
 
         device = next(model.parameters()).device
         with torch.no_grad():
-            image_tensors = torch.stack([preprocess(im.convert("RGB")) for im in images]).to(device)
-            image_features = model.encode_image(image_tensors)
+            image_tensors = torch.stack([preprocess(im.convert("RGB")) for im in images]).to(device) # Preprocess by convert images to RGB
+            image_features = model.encode_image(image_tensors)  
             image_features /= image_features.norm(dim=-1, keepdim=True)
 
-            text_tokens = tokenizer([query_text]).to(device)
+            text_tokens = tokenizer([query_text]).to(device) # Tokenize the texts
             text_features = model.encode_text(text_tokens)
             text_features /= text_features.norm(dim=-1, keepdim=True)
 
-            sims = (image_features @ text_features.T).squeeze(-1)
+            sims = (image_features @ text_features.T).squeeze(-1) # Calculate CLIP cosine similarity score
         return [float(s) for s in sims.cpu()]
     except Exception as e:
         log.warning(f"CLIP relevance filtering unavailable, skipping ({e})")
@@ -72,7 +72,7 @@ def _mean_rgb(image: Image.Image) -> np.ndarray:
     small = image.convert("RGB").resize((32, 32))
     return np.asarray(small, dtype=np.float32).reshape(-1, 3).mean(axis=0)
 
-
+# This should be replaced for a better pipeline
 def color_consistency_mask(images: list[Image.Image]) -> list[bool]:
     """
     Flags images whose mean color is far from the group's median color as
@@ -106,8 +106,7 @@ def filter_candidates(images: list[Image.Image], object_name: str) -> tuple[list
             # keep the single best-scoring image instead.
             keep = [int(np.argmax(clip_scores))]
 
-    consistent = color_consistency_mask([images[i] for i in keep])
-    kept = [idx for idx, ok in zip(keep, consistent) if ok]
+    kept = keep
 
     if len(kept) < MIN_KEPT_IMAGES:
         return kept, False
@@ -118,7 +117,7 @@ def segment_image(image: Image.Image) -> Image.Image:
     """Removes the background so TRELLIS gets an isolated subject on transparent RGBA."""
     try:
         from rembg import remove  # pip install rembg
-
+        log.info("[INFO]: RMBG initiates")
         return remove(image.convert("RGBA"))
     except Exception as e:
         log.warning(f"Background removal unavailable, using image as-is ({e})")
