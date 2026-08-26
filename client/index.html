@@ -497,6 +497,26 @@
       </select>
     </div>
 
+    <div class="resolved-box" style="margin-top:14px; display:flex;">
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+        <input type="checkbox" id="upload-auto-dim-check" checked />
+        Auto-detect real-world dimensions
+      </label>
+      <div id="upload-hint-wrap">
+        <label class="field-label" style="margin-top:8px;">What is it? (optional, improves accuracy)</label>
+        <input id="upload-object-hint" type="text" placeholder="e.g. IKEA Poäng armchair" />
+      </div>
+      <button id="upload-detect-dim-btn" class="secondary-btn" style="margin-top:4px;">Detect dimensions from image</button>
+      <div id="upload-dim-status" class="log" style="margin:0;"></div>
+
+      <div id="upload-manual-dim-wrap" style="display:none; flex-direction:column; gap:8px;">
+        <label class="field-label" style="margin:0;">Enter dimensions manually (cm)</label>
+        <input id="upload-dim-length" type="text" placeholder="Length (cm)" />
+        <input id="upload-dim-width" type="text" placeholder="Width (cm)" />
+        <input id="upload-dim-height" type="text" placeholder="Height (cm)" />
+      </div>
+    </div>
+
     <button id="run-btn" class="run-btn" disabled style="margin-top:14px;">Upload images to begin</button>
   </div>
 
@@ -533,6 +553,22 @@
         <option value="stochastic">Stochastic (sharper detail)</option>
         <option value="multidiffusion">Multidiffusion (more consistent)</option>
       </select>
+    </div>
+
+    <div class="resolved-box" id="prompt-dim-wrap" style="display:none; flex-direction:column;">
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+        <input type="checkbox" id="prompt-auto-dim-check" checked />
+        Auto-detect real-world dimensions
+      </label>
+      <div style="font-size:11.5px; color:var(--text-dim);">
+        Skipped automatically if no consistent photos are found and an AI-generated reference image is used instead.
+      </div>
+      <div id="prompt-manual-dim-wrap" style="display:none; flex-direction:column; gap:8px;">
+        <label class="field-label" style="margin:0;">Enter dimensions manually (cm)</label>
+        <input id="prompt-dim-length" type="text" placeholder="Length (cm)" />
+        <input id="prompt-dim-width" type="text" placeholder="Width (cm)" />
+        <input id="prompt-dim-height" type="text" placeholder="Height (cm)" />
+      </div>
     </div>
 
     <button id="prompt-generate-btn" class="run-btn" style="display:none">Generate 3D Model</button>
@@ -619,6 +655,91 @@ const toggleRotateBtn = document.getElementById('toggle-rotate');
 const resetCamBtn = document.getElementById('reset-cam');
 const algoSelect = document.getElementById('algo-select');
 
+// ----- Upload-mode dimension controls -----
+const uploadAutoDimCheck = document.getElementById('upload-auto-dim-check');
+const uploadHintWrap = document.getElementById('upload-hint-wrap');
+const uploadObjectHint = document.getElementById('upload-object-hint');
+const uploadDetectDimBtn = document.getElementById('upload-detect-dim-btn');
+const uploadDimStatus = document.getElementById('upload-dim-status');
+const uploadManualDimWrap = document.getElementById('upload-manual-dim-wrap');
+const uploadDimLength = document.getElementById('upload-dim-length');
+const uploadDimWidth = document.getElementById('upload-dim-width');
+const uploadDimHeight = document.getElementById('upload-dim-height');
+
+let uploadDetectedDims = null; // {length_cm, width_cm, height_cm} once /identify_dimensions succeeds
+
+function refreshUploadDimControls() {
+  const auto = uploadAutoDimCheck.checked;
+  uploadHintWrap.style.display = auto ? 'block' : 'none';
+  uploadDetectDimBtn.style.display = auto ? 'block' : 'none';
+  // Manual entry is available either when auto-detect is off, or when it's
+  // on but detection hasn't found anything yet (fallback path).
+  uploadManualDimWrap.style.display = (!auto || (auto && uploadDetectedDims === null)) ? 'flex' : 'none';
+  if (auto) uploadManualDimWrap.querySelector('.field-label').textContent =
+    'Or enter manually if detection fails (cm)';
+  else uploadManualDimWrap.querySelector('.field-label').textContent = 'Enter dimensions manually (cm)';
+}
+uploadAutoDimCheck.addEventListener('change', () => {
+  uploadDetectedDims = null;
+  uploadDimStatus.textContent = '';
+  refreshUploadDimControls();
+});
+refreshUploadDimControls();
+
+uploadDetectDimBtn.addEventListener('click', async () => {
+  if (files.length === 0) {
+    uploadDimStatus.textContent = 'Upload at least one image first.';
+    uploadDimStatus.className = 'log error';
+    return;
+  }
+  uploadDetectDimBtn.disabled = true;
+  uploadDimStatus.textContent = 'Identifying object and looking up specs…';
+  uploadDimStatus.className = 'log';
+  try {
+    const form = new FormData();
+    form.append('image', files[0]);
+    form.append('object_name_hint', uploadObjectHint.value.trim());
+    const res = await fetch(`${serverUrl()}/identify_dimensions`, { method: 'POST', body: form });
+    if (!res.ok) throw new Error(`Server returned ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    if (data.found) {
+      uploadDetectedDims = { length_cm: data.length_cm, width_cm: data.width_cm, height_cm: data.height_cm };
+      const parts = [];
+      if (data.length_cm) parts.push(`L ${data.length_cm}cm`);
+      if (data.width_cm) parts.push(`W ${data.width_cm}cm`);
+      if (data.height_cm) parts.push(`H ${data.height_cm}cm`);
+      uploadDimStatus.textContent = `Detected ${data.identified_name}: ${parts.join(' × ')} (${data.confidence} confidence)`;
+      uploadDimStatus.className = 'log ok';
+    } else {
+      uploadDetectedDims = null;
+      uploadDimStatus.textContent = `Couldn't find precise dimensions for ${data.identified_name}. Enter them manually below.`;
+      uploadDimStatus.className = 'log error';
+    }
+  } catch (err) {
+    uploadDetectedDims = null;
+    uploadDimStatus.textContent = `Detection failed: ${err.message}`;
+    uploadDimStatus.className = 'log error';
+  } finally {
+    uploadDetectDimBtn.disabled = false;
+    refreshUploadDimControls();
+  }
+});
+
+function getUploadTargetDimensions() {
+  if (uploadAutoDimCheck.checked && uploadDetectedDims) {
+    return { dims: uploadDetectedDims, source: 'auto_detected' };
+  }
+  const length_cm = parseFloat(uploadDimLength.value);
+  const width_cm = parseFloat(uploadDimWidth.value);
+  const height_cm = parseFloat(uploadDimHeight.value);
+  const dims = {};
+  if (!isNaN(length_cm)) dims.length_cm = length_cm;
+  if (!isNaN(width_cm)) dims.width_cm = width_cm;
+  if (!isNaN(height_cm)) dims.height_cm = height_cm;
+  if (Object.keys(dims).length === 0) return null;
+  return { dims, source: 'manual' };
+}
+
 const dimEmpty = document.getElementById('dim-empty');
 const dimContent = document.getElementById('dim-content');
 const dimX = document.getElementById('dim-x');
@@ -660,6 +781,29 @@ const resolvedQuery = document.getElementById('resolved-query');
 const promptAlgoWrap = document.getElementById('prompt-algo-wrap');
 const promptAlgoSelect = document.getElementById('prompt-algo-select');
 const promptGenerateBtn = document.getElementById('prompt-generate-btn');
+const promptDimWrap = document.getElementById('prompt-dim-wrap');
+const promptAutoDimCheck = document.getElementById('prompt-auto-dim-check');
+const promptManualDimWrap = document.getElementById('prompt-manual-dim-wrap');
+const promptDimLength = document.getElementById('prompt-dim-length');
+const promptDimWidth = document.getElementById('prompt-dim-width');
+const promptDimHeight = document.getElementById('prompt-dim-height');
+
+function refreshPromptDimControls() {
+  promptManualDimWrap.style.display = promptAutoDimCheck.checked ? 'none' : 'flex';
+}
+promptAutoDimCheck.addEventListener('change', refreshPromptDimControls);
+refreshPromptDimControls();
+
+function getPromptTargetDimensions() {
+  const length_cm = parseFloat(promptDimLength.value);
+  const width_cm = parseFloat(promptDimWidth.value);
+  const height_cm = parseFloat(promptDimHeight.value);
+  const dims = {};
+  if (!isNaN(length_cm)) dims.length_cm = length_cm;
+  if (!isNaN(width_cm)) dims.width_cm = width_cm;
+  if (!isNaN(height_cm)) dims.height_cm = height_cm;
+  return Object.keys(dims).length ? dims : null;
+}
 
 let qaHistory = [];
 let resolvedResult = null; // holds the final {search_query, search_filters, ...} once resolved
@@ -670,6 +814,7 @@ function resetPromptFlow() {
   clarifyBox.style.display = 'none';
   resolvedBox.style.display = 'none';
   promptAlgoWrap.style.display = 'none';
+  promptDimWrap.style.display = 'none';
   promptGenerateBtn.style.display = 'none';
   clarifyAnswer.value = '';
 }
@@ -713,6 +858,7 @@ function showResolved(data) {
   resolvedObject.textContent = data.object_name || '—';
   resolvedQuery.textContent = data.search_query || '—';
   promptAlgoWrap.style.display = 'block';
+  promptDimWrap.style.display = 'flex';
   promptGenerateBtn.style.display = 'block';
 }
 
@@ -779,8 +925,11 @@ promptGenerateBtn.addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         search_query: resolvedResult.search_query,
+        object_name: resolvedResult.object_name || '',
         prefer_shopping_results: !!(resolvedResult.search_filters && resolvedResult.search_filters.prefer_shopping_results),
         multiimage_algo: promptAlgoSelect.value,
+        auto_dimensions: promptAutoDimCheck.checked,
+        target_dimensions_cm: promptAutoDimCheck.checked ? null : getPromptTargetDimensions(),
       }),
     });
 
@@ -800,7 +949,13 @@ promptGenerateBtn.addEventListener('click', async () => {
     downloadLink.style.display = 'inline-block';
 
     renderDimensions(data.dimensions);
-    setLog(`Model generated from ${data.num_images_used} scraped image(s).`, 'ok');
+
+    const sourceNote = data.used_ai_generated_reference
+      ? 'no consistent photos found — used an AI-generated reference image (dimension lookup skipped)'
+      : data.dimensions_source === 'none'
+        ? 'no real-world scale applied — normalized units only'
+        : `scaled to real-world size, source: ${data.dimensions_source}`;
+    setLog(`Model generated from ${data.num_images_used} image(s) (${sourceNote}).`, 'ok');
   } catch (err) {
     setLog(`Failed: ${err.message}`, 'error');
   } finally {
@@ -906,9 +1061,15 @@ runBtn.addEventListener('click', async () => {
 
   const form = new FormData();
   files.forEach(f => form.append('images', f));
+  form.append('multiimage_algo', algoSelect.value);
+  const target = getUploadTargetDimensions();
+  if (target) {
+    form.append('target_dimensions_cm', JSON.stringify(target.dims));
+    form.append('dimensions_source', target.source);
+  }
 
   try {
-    const res = await fetch(`${serverUrl()}/generate?multiimage_algo=${algoSelect.value}`, {
+    const res = await fetch(`${serverUrl()}/generate`, {
       method: 'POST',
       body: form,
     });
@@ -930,7 +1091,10 @@ runBtn.addEventListener('click', async () => {
 
     renderDimensions(data.dimensions);
 
-    setLog('Model generated successfully.', 'ok');
+    const scaledNote = data.dimensions_source === 'none'
+      ? ' (no real-world scale applied — normalized units only)'
+      : ` (scaled to real-world size, source: ${data.dimensions_source})`;
+    setLog(`Model generated successfully${scaledNote}.`, 'ok');
   } catch (err) {
     setLog(`Failed: ${err.message}`, 'error');
   } finally {

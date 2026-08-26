@@ -16,6 +16,7 @@ Then, from your laptop, either:
 
 import argparse
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -23,6 +24,7 @@ import uuid
 import sys
 from pathlib import Path
 from dataclasses import asdict
+from typing import Optional
 
 # Add project root (AssetsAnything) to Python path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -31,13 +33,17 @@ if str(ROOT_DIR) not in sys.path:
 
 os.environ.setdefault("SPCONV_ALGO", "native")
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from preprocessing.restructure_prompt import build_user_input, rewrite_prompt
 from preprocessing.web_scraping import download_images, get_result
+from preprocessing.dimension_lookup import lookup_dimensions_from_url
+from preprocessing.image_filter import filter_candidates, segment_image
+from preprocessing.image_gen import generate_reference_image
+from postprocessing.scaling import scale_glb_to_real_world
 from PIL import Image
 
 app = FastAPI(title="TRELLIS Inference Server")
@@ -57,11 +63,32 @@ pipeline = None
 OUTPUT_DIR = tempfile.mkdtemp(prefix="trellis_outputs_")
 
 SCRAPE_DIR = tempfile.mkdtemp(prefix="trellis_scrapes_")
- 
+
+# Where user-uploaded images are briefly hosted so Google Lens (via SerpApi)
+# can fetch them by URL -- Lens only accepts public image URLs, not raw
+# uploads. This directory is served at GET /tmp_uploads/{filename} below.
+# Requires this server to actually be reachable from the internet when
+# /identify_dimensions is called (an SSH-tunnel-only setup won't work for
+# this one endpoint, even though everything else works fine over a tunnel).
+TMP_UPLOAD_DIR = tempfile.mkdtemp(prefix="trellis_tmp_uploads_")
+
 # VLM endpoint used for prompt rewriting/classification — point this at
 # wherever you're serving Qwen2.5-VL (or another OpenAI-compatible VLM).
 VLM_BASE_URL = os.environ.get("VLM_BASE_URL", "http://localhost:9000/v1")
 VLM_MODEL = os.environ.get("VLM_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct")
+
+SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "")
+
+# Optional -- set this if the server sits behind a reverse proxy / different
+# public hostname than the one the request came in on. If unset, the
+# request's own base URL is used (fine for a directly-exposed server).
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "")
+
+# Backend used for the "AI-generated reference image" fallback in flow B,
+# when scraping can't find enough consistent real photos. Point it at
+# whatever image-gen backend exposes an OpenAI-compatible images API.
+IMAGE_GEN_BASE_URL = os.environ.get("IMAGE_GEN_BASE_URL", "")
+IMAGE_GEN_MODEL = os.environ.get("IMAGE_GEN_MODEL", "")
 
 def get_pipeline():
     global pipeline
@@ -126,7 +153,9 @@ def health():
 @app.post("/generate")
 async def generate(
     images: list[UploadFile] = File(...),
-    multiimage_algo: str = "stochastic",  # "stochastic" or "multidiffusion"
+    multiimage_algo: str = Form("stochastic"),  # "stochastic" or "multidiffusion"
+    target_dimensions_cm: str = Form(""),  # JSON string, e.g. {"length_cm":30,"width_cm":20,"height_cm":15}
+    dimensions_source: str = Form("manual"),  # "manual" or "auto_detected", just for labeling the response
 ):
     os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
     os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
@@ -142,7 +171,81 @@ async def generate(
             raise HTTPException(400, f"Could not read image '{f.filename}': {e}")
         pil_images.append(img)
 
-    return run_trellis_and_export(pil_images, multiimage_algo)
+    result = run_trellis_and_export(pil_images, multiimage_algo)
+    apply_optional_scaling(result, target_dimensions_cm, dimensions_source)
+    return result
+
+
+def apply_optional_scaling(result: dict, target_dimensions_cm_json: str, dimensions_source: str) -> None:
+    """
+    Mutates `result` in place: if a usable target dimension was supplied
+    (auto-detected via /identify_dimensions or typed in manually on the
+    client), rescales the exported .glb and swaps in the real-world
+    bounding box. Leaves `result` untouched (normalized units) otherwise.
+    """
+    result["dimensions_source"] = "none"
+    if not target_dimensions_cm_json:
+        return
+
+    try:
+        target_dims = json.loads(target_dimensions_cm_json)
+    except Exception:
+        return
+
+    out_path = os.path.join(OUTPUT_DIR, f"{result['job_id']}.glb")
+    scaled = scale_glb_to_real_world(out_path, result["dimensions"], target_dims)
+    if scaled:
+        result["dimensions"] = scaled
+        result["dimensions_source"] = dimensions_source
+
+
+@app.get("/tmp_uploads/{filename}")
+def serve_tmp_upload(filename: str):
+    """
+    Briefly serves a user-uploaded image so Google Lens (via SerpApi) can
+    fetch it by URL -- see /identify_dimensions and TMP_UPLOAD_DIR above.
+    """
+    path = os.path.join(TMP_UPLOAD_DIR, filename)
+    if not os.path.exists(path):
+        raise HTTPException(404, "Not found (it may have already been cleaned up).")
+    return FileResponse(path)
+
+
+@app.post("/identify_dimensions")
+async def identify_dimensions(
+    request: Request,
+    image: UploadFile = File(...),
+    object_name_hint: str = Form(""),
+):
+    """
+    Flow-A "auto-detect dimensions" checkbox: identifies the uploaded
+    object via Google Lens, searches for its published specs via Google
+    Search, and asks the LLM to extract a structured length/width/height.
+    Returns found=false (never a guessed number) if nothing explicit was
+    found -- the client should fall back to asking the user to type
+    dimensions in by hand.
+    """
+    if not SERPAPI_API_KEY:
+        raise HTTPException(500, "SERPAPI_API_KEY is not configured on the server.")
+
+    raw = await image.read()
+    try:
+        pil_image = Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(400, f"Could not read image: {e}")
+
+    filename = f"{uuid.uuid4()}.jpg"
+    tmp_path = os.path.join(TMP_UPLOAD_DIR, filename)
+    pil_image.save(tmp_path, format="JPEG")
+
+    base_url = PUBLIC_BASE_URL.rstrip("/") if PUBLIC_BASE_URL else str(request.base_url).rstrip("/")
+    image_url = f"{base_url}/tmp_uploads/{filename}"
+
+    result = lookup_dimensions_from_url(
+        image_url, object_name_hint, SERPAPI_API_KEY, VLM_BASE_URL, VLM_MODEL
+    )
+    return asdict(result)
+
 
 class QAPair(BaseModel):
     question: str
@@ -182,22 +285,35 @@ def rewrite_prompt_endpoint(req: RewritePromptRequest):
  
 class SearchAndGenerateRequest(BaseModel):
     search_query: str
+    object_name: str = ""  # from /rewrite_prompt's object_name -- used for CLIP filtering + dimension lookup
     prefer_shopping_results: bool = False
     multiimage_algo: str = "stochastic"
+    auto_dimensions: bool = True
+    target_dimensions_cm: Optional[dict] = None  # manual override; wins over auto-detection if provided
+
 
 @app.post("/search_and_generate")
 def search_and_generate(req: SearchAndGenerateRequest):
     """
     Takes a FINAL, already-resolved search query (i.e. after any
-    clarification round-trip via /rewrite_prompt has completed) — searches
-    for candidate images, downloads them, and runs them straight through
-    TRELLIS. Mirrors /generate's response shape.
+    clarification round-trip via /rewrite_prompt has completed) and runs
+    the full flow-B pipeline:
+
+      scrape candidates -> CLIP relevance + color-consistency filter
+        -> if enough good images survive: segment each, optionally look up
+           real-world dimensions via Google Lens + Search on the best one
+        -> if not enough survive: generate a single AI reference image
+           instead (dimension lookup is skipped -- there's no real object
+           to identify)
+      -> run TRELLIS -> optionally scale to real-world size -> export.
     """
     engine = "google_images"
 
     os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
     os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto'
- 
+
+    object_name = req.object_name or req.search_query
+
     scraped = get_result(req.search_query, engine=engine, language="en")
     if not scraped:
         raise HTTPException(
@@ -205,25 +321,76 @@ def search_and_generate(req: SearchAndGenerateRequest):
             f"No usable images found for {req.search_query!r}. "
             "Try a more specific prompt.",
         )
- 
+
     job_dir = os.path.join(SCRAPE_DIR, str(uuid.uuid4()))
-    local_paths = download_images(scraped, job_dir)
-    if not local_paths:
+    downloaded = download_images(scraped, job_dir)
+    if not downloaded:
         raise HTTPException(422, "Found candidate images but all downloads failed.")
- 
-    pil_images = []
-    for p in local_paths:
+
+    candidates = []  # list of (pil_image, ScrapedImage)
+    for path, scraped_img in downloaded:
         try:
-            pil_images.append(Image.open(p).convert("RGBA"))
+            candidates.append((Image.open(path).convert("RGBA"), scraped_img))
         except Exception as e:
-            print(f"[server] skipping unreadable image {p}: {e}")
- 
-    if not pil_images:
+            print(f"[server] skipping unreadable image {path}: {e}")
+
+    if not candidates:
         raise HTTPException(422, "Downloaded files could not be read as images.")
- 
+
+    kept_indices, filtering_ok = filter_candidates([im for im, _ in candidates], object_name)
+    used_ai_reference = False
+    identified_dimensions = None
+
+    if filtering_ok:
+        kept = [candidates[i] for i in kept_indices]
+        pil_images = [segment_image(im) for im, _ in kept]
+
+        if req.auto_dimensions and SERPAPI_API_KEY:
+            best_image_url = kept[0][1].url
+            dim_result = lookup_dimensions_from_url(
+                best_image_url, object_name, SERPAPI_API_KEY, VLM_BASE_URL, VLM_MODEL
+            )
+            if dim_result.found:
+                identified_dimensions = asdict(dim_result)
+    else:
+        used_ai_reference = True
+        if not (IMAGE_GEN_BASE_URL and IMAGE_GEN_MODEL):
+            raise HTTPException(
+                422,
+                f"No consistent, on-topic photos of {object_name!r} were found, and no "
+                "IMAGE_GEN_BASE_URL/IMAGE_GEN_MODEL is configured for the AI-generated "
+                "fallback. Try a more specific prompt, or configure an image-gen backend.",
+            )
+        pil_images = [generate_reference_image(object_name, IMAGE_GEN_BASE_URL, IMAGE_GEN_MODEL)]
+
     result = run_trellis_and_export(pil_images, req.multiimage_algo)
     result["num_images_used"] = len(pil_images)
-    result["source_titles"] = [img.title for img in scraped[:len(pil_images)]]
+    result["used_ai_generated_reference"] = used_ai_reference
+    result["source_titles"] = (
+        ["AI-generated reference image"] if used_ai_reference
+        else [candidates[i][1].title for i in kept_indices]
+    )
+
+    target_dims = req.target_dimensions_cm
+    dimensions_source = "manual"
+    if not target_dims and identified_dimensions and identified_dimensions.get("found"):
+        target_dims = {
+            "length_cm": identified_dimensions.get("length_cm"),
+            "width_cm": identified_dimensions.get("width_cm"),
+            "height_cm": identified_dimensions.get("height_cm"),
+        }
+        dimensions_source = "auto_detected"
+
+    result["identified_dimensions"] = identified_dimensions
+    result["dimensions_source"] = "none"
+    if target_dims:
+        scaled = scale_glb_to_real_world(
+            os.path.join(OUTPUT_DIR, f"{result['job_id']}.glb"), result["dimensions"], target_dims
+        )
+        if scaled:
+            result["dimensions"] = scaled
+            result["dimensions_source"] = dimensions_source
+
     return result
 
 def compute_bounding_box(glb_path: str):

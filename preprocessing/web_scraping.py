@@ -54,10 +54,15 @@ def get_result(
     log.info(f"Found {len(images)} shopping images for {search_query!r}")
     return images
 
-def download_images(images: list[ScrapedImage], out_dir: str) -> list[str]:
-    """Downloads image URLs to disk, skipping any that fail. Returns local paths."""
+def download_images(images: list[ScrapedImage], out_dir: str) -> list[tuple[str, ScrapedImage]]:
+    """
+    Downloads image URLs to disk, skipping any that fail. Returns
+    (local_path, source_image) pairs -- kept paired up (rather than two
+    parallel lists) so a failed download can't silently shift every
+    downstream index off by one.
+    """
     os.makedirs(out_dir, exist_ok=True)
-    paths = []
+    pairs = []
     for i, img in enumerate(images):
         try:
             resp = requests.get(img.url, timeout=10)
@@ -65,12 +70,12 @@ def download_images(images: list[ScrapedImage], out_dir: str) -> list[str]:
             path = os.path.join(out_dir, f"candidate_{i:02d}.jpg")
             with open(path, "wb") as f:
                 f.write(resp.content)
-            paths.append(path)
+            pairs.append((path, img))
         except Exception as e:
             log.warning(f"Failed to download {img.url}: {e}")
             continue
-    log.info(f"Downloaded {len(paths)}/{len(images)} images to {out_dir}")
-    return paths
+    log.info(f"Downloaded {len(pairs)}/{len(images)} images to {out_dir}")
+    return pairs
 
 def main():
     import argparse
@@ -83,7 +88,9 @@ def main():
     logging.basicConfig(level=logging.INFO)
     images = get_result(args.search_query, args.engine, args.language)
     if images:
-        download_images(images, "./scraped_images")
+        pairs = download_images(images, "./scraped_images")
+        for path, img in pairs:
+            print(f"{path} <- {img.url}")
 
 
 if __name__ == "__main__":
