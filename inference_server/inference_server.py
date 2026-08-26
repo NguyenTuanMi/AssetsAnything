@@ -25,6 +25,11 @@ import sys
 from pathlib import Path
 from dataclasses import asdict
 from typing import Optional
+import collections
+import logging
+import re
+import threading
+from datetime import datetime, timezone
 
 # Add project root (AssetsAnything) to Python path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -45,6 +50,80 @@ from preprocessing.image_filter import filter_candidates, segment_image
 from preprocessing.image_gen import generate_reference_image
 from postprocessing.scaling import scale_glb_to_real_world
 from PIL import Image
+
+_log_buffer = collections.deque(maxlen=4000)
+_log_counter = 0
+_log_lock = threading.Lock()
+ 
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+
+_EXCLUDE_RE = re.compile(r'"(GET|OPTIONS|POST) /(logs|health|download|search_and_generate|rewrite_prompt)') 
+
+def _append_log(line: str):
+    global _log_counter
+    line = _ANSI_RE.sub('', line).rstrip()
+    if not line or _EXCLUDE_RE.search(line):
+        return
+ 
+    lower = line.lower()
+    if 'traceback' in lower or 'error' in lower or 'exception' in lower:
+        level = 'ERROR'
+    elif 'warning' in lower:
+        level = 'WARNING'
+    else:
+        level = 'INFO'
+ 
+    with _log_lock:
+        _log_counter += 1
+        _log_buffer.append({
+            "index": _log_counter,
+            "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            "level": level,
+            "message": line,
+        })
+
+class _TeeStream:
+    """
+    Mirrors every write to the ORIGINAL stream (so your terminal is
+    completely unaffected -- you still see exactly what you always did)
+    while also splitting it into lines and feeding them into the log
+    buffer. This is stream-level, not logging-level, so it catches
+    print(), logging output, tqdm's \\r-based progress redraws,
+    warnings.warn(), and uvicorn's own access/error logs -- all of it,
+    regardless of which mechanism produced it.
+    """
+    def __init__(self, original_stream):
+        self.original_stream = original_stream
+        self._partial = ""
+ 
+    def write(self, data):
+        self.original_stream.write(data)
+        self._buffer(data)
+        return len(data)
+ 
+    def flush(self):
+        self.original_stream.flush()
+ 
+    def isatty(self):
+        # Returning False makes libraries that check this (uvicorn, tqdm)
+        # skip ANSI color codes -- slightly plainer terminal output, but
+        # avoids garbled escape sequences showing up in the web console.
+        return False
+ 
+    def _buffer(self, data):
+        self._partial += data
+        # tqdm redraws the same line via \r instead of \n -- treat both as
+        # line breaks so each progress update becomes its own log entry
+        # instead of one giant run-on string.
+        parts = re.split(r'[\r\n]', self._partial)
+        self._partial = parts[-1]
+        for line in parts[:-1]:
+            _append_log(line)
+ 
+ 
+sys.stdout = _TeeStream(sys.stdout)
+sys.stderr = _TeeStream(sys.stderr)
+
 
 app = FastAPI(title="TRELLIS Inference Server")
 
@@ -199,6 +278,12 @@ def apply_optional_scaling(result: dict, target_dimensions_cm_json: str, dimensi
         result["dimensions"] = scaled
         result["dimensions_source"] = dimensions_source
 
+@app.get("/logs")
+def get_logs(after: int = 0):
+    with _log_lock:
+        lines = [l for l in _log_buffer if l["index"] > after]
+        next_cursor = _log_buffer[-1]["index"] if _log_buffer else after
+    return {"lines": lines, "next_cursor": next_cursor}
 
 @app.get("/tmp_uploads/{filename}")
 def serve_tmp_upload(filename: str):
