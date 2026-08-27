@@ -132,6 +132,7 @@ def run_trellis_and_export(pil_images: list[Image.Image], multiimage_algo: str =
     )
  
     job_id = str(uuid.uuid4())
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     out_path = os.path.join(OUTPUT_DIR, f"{job_id}.glb")
     glb.export(out_path)
  
@@ -235,6 +236,7 @@ async def identify_dimensions(
         raise HTTPException(400, f"Could not read image: {e}")
 
     filename = f"{uuid.uuid4()}.jpg"
+    os.makedirs(TMP_UPLOAD_DIR, exist_ok=True)
     tmp_path = os.path.join(TMP_UPLOAD_DIR, filename)
     pil_image.save(tmp_path, format="JPEG")
 
