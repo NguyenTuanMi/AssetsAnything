@@ -5,9 +5,9 @@ actually match the object), then a color-consistency pass (drop outliers,
 since a query like "Nike Air Jordan 1" will scrape several colorways and
 multi-image fusion assumes ALL views are of the SAME physical object).
 
-Both passes degrade gracefully: if a dependency (open_clip / rembg) isn't
-installed on the remote box, we log a warning and skip that pass rather
-than failing the whole request.
+Both passes degrade gracefully: if a dependency (open_clip / transformers+
+briaai/RMBG-2.0) isn't installed on the remote box, we log a warning and
+skip that pass rather than failing the whole request.
 """
 from __future__ import annotations
 
@@ -19,7 +19,23 @@ from PIL import Image
 
 log = logging.getLogger("image_filter")
 
-CLIP_RELEVANCE_THRESHOLD = 0.20   # cosine similarity, OpenCLIP-typical scale
+# ViT-L-14 scores meaningfully more accurately than ViT-B-32 at telling
+# "hair dryer" from "phone" apart -- worth the extra VRAM/latency given how
+# much downstream TRELLIS time gets wasted on a bad candidate set.
+CLIP_MODEL_NAME = "ViT-L-14"
+CLIP_PRETRAINED = "openai"
+
+# With the "a product photo of a {}" template below, OpenAI-CLIP cosine
+# similarities for a correct match on ViT-L-14 typically land ~0.27-0.35;
+# unrelated products often still land ~0.18-0.25 on the un-templated raw
+# label. Bare labels (no template) score lower and closer together across
+# related/unrelated pairs, which is what let an iPhone through on a
+# "hair dryer" query at the old 0.20 threshold -- so raise the bar together
+# with the template.
+CLIP_RELEVANCE_THRESHOLD = 0.31
+CLIP_PROMPT_TEMPLATE = "a product photo of a {}, studio shot"
+MAX_FUSION_IMAGES = 3
+
 COLOR_OUTLIER_DISTANCE = 60.0     # euclidean distance in mean-RGB space (0-255)
 MIN_KEPT_IMAGES = 1               # below this, caller should treat the batch as "bad"
 
@@ -35,9 +51,9 @@ def _get_clip():
         import torch
 
         model, _, preprocess = open_clip.create_model_and_transforms(
-            "ViT-B-32", pretrained="openai"
+            CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED
         )
-        tokenizer = open_clip.get_tokenizer("ViT-B-32")
+        tokenizer = open_clip.get_tokenizer(CLIP_MODEL_NAME)
         model.eval()
         if torch.cuda.is_available():
             model = model.cuda()
@@ -51,13 +67,15 @@ def clip_relevance_scores(images: list[Image.Image], query_text: str) -> Optiona
         model, preprocess, tokenizer = _get_clip()
         import torch
 
+        prompt = CLIP_PROMPT_TEMPLATE.format(query_text)
+
         device = next(model.parameters()).device
         with torch.no_grad():
             image_tensors = torch.stack([preprocess(im.convert("RGB")) for im in images]).to(device) # Preprocess by convert images to RGB
-            image_features = model.encode_image(image_tensors)  
+            image_features = model.encode_image(image_tensors)
             image_features /= image_features.norm(dim=-1, keepdim=True)
 
-            text_tokens = tokenizer([query_text]).to(device) # Tokenize the texts
+            text_tokens = tokenizer([prompt]).to(device) # Tokenize the templated prompt
             text_features = model.encode_text(text_tokens)
             text_features /= text_features.norm(dim=-1, keepdim=True)
 
@@ -72,7 +90,6 @@ def _mean_rgb(image: Image.Image) -> np.ndarray:
     small = image.convert("RGB").resize((32, 32))
     return np.asarray(small, dtype=np.float32).reshape(-1, 3).mean(axis=0)
 
-# This should be replaced for a better pipeline
 def color_consistency_mask(images: list[Image.Image]) -> list[bool]:
     """
     Flags images whose mean color is far from the group's median color as
@@ -106,19 +123,27 @@ def filter_candidates(images: list[Image.Image], object_name: str) -> tuple[list
             # keep the single best-scoring image instead.
             keep = [int(np.argmax(clip_scores))]
 
+    if len(keep) > 2:
+        mask = color_consistency_mask([images[i] for i in keep])
+        color_kept = [i for i, ok in zip(keep, mask) if ok]
+        if color_kept:
+            # Same relax-don't-nuke rule as CLIP: an all-outlier verdict just
+            # means the group is genuinely multi-colorway, not that nothing
+            # is usable -- keep the pre-color-filter set in that case.
+            keep = color_kept
+
     kept = keep
 
     if len(kept) < MIN_KEPT_IMAGES:
         return kept, False
     return kept, True
 
-
 def segment_image(image: Image.Image) -> Image.Image:
     """Removes the background so TRELLIS gets an isolated subject on transparent RGBA."""
     try:
         from rembg import remove  # pip install rembg
         log.info("[INFO]: RMBG initiates")
-        return remove(image.convert("RGBA"))
+        return remove(image.convert("RGBA"), decontaminate=True)
     except Exception as e:
         log.warning(f"Background removal unavailable, using image as-is ({e})")
         return image.convert("RGBA")

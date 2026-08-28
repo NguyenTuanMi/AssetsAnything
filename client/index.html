@@ -547,6 +547,69 @@
     border-top: 1px solid var(--border);
     padding-top: 12px;
   }
+
+  .resize-inputs {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 6px;
+  }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 20px;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    max-width: 560px;
+    width: 100%;
+    max-height: 80vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+  }
+  .modal-header button {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-size: 16px;
+    cursor: pointer;
+    line-height: 1;
+  }
+  .modal-header button:hover { color: var(--text); }
+  .modal-summary {
+    font-size: 12.5px;
+    color: var(--text-dim);
+    margin: 0;
+  }
+  #scrape-modal-thumbs.thumbs {
+    grid-template-columns: repeat(4, 1fr);
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .modal-actions .run-btn, .modal-actions .secondary-btn { margin-top: 0; }
 </style>
 </head>
 <body>
@@ -727,6 +790,35 @@
       Values are in normalized model-space units, not real-world measurements — TRELLIS doesn't infer true physical scale from images alone.
     </div>
   </div>
+
+  <div id="resize-box" style="display:none; flex-direction:column; gap:10px;">
+    <h2>Resize object</h2>
+    <div style="font-size:11.5px; color:var(--text-dim);">
+      Works any time after generation — applies on top of whatever scale (or none) is currently set.
+    </div>
+    <div class="resize-inputs">
+      <input id="resize-length" type="text" placeholder="Length (cm)" />
+      <input id="resize-width" type="text" placeholder="Width (cm)" />
+      <input id="resize-height" type="text" placeholder="Height (cm)" />
+    </div>
+    <button id="resize-apply-btn" class="secondary-btn">Apply size</button>
+    <div id="resize-status" class="log" style="margin:0;"></div>
+  </div>
+</div>
+
+<div id="scrape-modal-backdrop" class="modal-backdrop">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span>Images scraped successfully</span>
+      <button id="scrape-modal-close-btn">✕</button>
+    </div>
+    <p id="scrape-modal-summary" class="modal-summary"></p>
+    <div id="scrape-modal-thumbs" class="thumbs"></div>
+    <div class="modal-actions">
+      <button id="scrape-modal-cancel-btn" class="secondary-btn">Cancel</button>
+      <button id="scrape-modal-continue-btn" class="run-btn">Continue to 3D generation</button>
+    </div>
+  </div>
 </div>
 
 <div id="console-drawer">
@@ -853,6 +945,99 @@ const dimDiag = document.getElementById('dim-diag');
 const dimMin = document.getElementById('dim-min');
 const dimMax = document.getElementById('dim-max');
 const dimUnits = document.getElementById('dim-units');
+
+// ----- Persistent resize box (works post-generation, any time) -----
+const resizeBox = document.getElementById('resize-box');
+const resizeLength = document.getElementById('resize-length');
+const resizeWidth = document.getElementById('resize-width');
+const resizeHeight = document.getElementById('resize-height');
+const resizeApplyBtn = document.getElementById('resize-apply-btn');
+const resizeStatus = document.getElementById('resize-status');
+
+let currentJobId = null; // set after any successful generation, from data.job_id
+
+function setCurrentJob(jobId) {
+  currentJobId = jobId;
+  resizeBox.style.display = jobId ? 'flex' : 'none';
+  resizeStatus.textContent = '';
+}
+
+resizeApplyBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+
+  const length_cm = parseFloat(resizeLength.value);
+  const width_cm = parseFloat(resizeWidth.value);
+  const height_cm = parseFloat(resizeHeight.value);
+  if (isNaN(length_cm) || isNaN(width_cm) || isNaN(height_cm)) {
+    resizeStatus.textContent = 'Enter all three dimensions.';
+    resizeStatus.className = 'log error';
+    return;
+  }
+
+  resizeApplyBtn.disabled = true;
+  resizeStatus.textContent = 'Resizing…';
+  resizeStatus.className = 'log';
+
+  try {
+    const res = await fetch(`${serverUrl()}/apply_dimensions/${currentJobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ length_cm, width_cm, height_cm }),
+    });
+    if (!res.ok) throw new Error(`Server returned ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+
+    // Cache-bust: the .glb is overwritten in place server-side, but
+    // model-viewer/browser will otherwise keep showing the cached old
+    // geometry for the same URL.
+    const modelUrl = `${serverUrl()}${data.download_url}?t=${Date.now()}`;
+    viewer.src = modelUrl;
+    downloadLink.href = modelUrl;
+
+    renderDimensions(data.dimensions);
+    resizeStatus.textContent = `Resized to ${length_cm} × ${width_cm} × ${height_cm} cm.`;
+    resizeStatus.className = 'log ok';
+  } catch (err) {
+    resizeStatus.textContent = `Failed: ${err.message}`;
+    resizeStatus.className = 'log error';
+  } finally {
+    resizeApplyBtn.disabled = false;
+  }
+});
+
+// ----- Scrape preview modal -----
+const scrapeModalBackdrop = document.getElementById('scrape-modal-backdrop');
+const scrapeModalSummary = document.getElementById('scrape-modal-summary');
+const scrapeModalThumbs = document.getElementById('scrape-modal-thumbs');
+const scrapeModalCloseBtn = document.getElementById('scrape-modal-close-btn');
+const scrapeModalCancelBtn = document.getElementById('scrape-modal-cancel-btn');
+const scrapeModalContinueBtn = document.getElementById('scrape-modal-continue-btn');
+
+let pendingScrapeId = null;
+let pendingGenerateParams = null;
+
+function showScrapeModal(data) {
+  scrapeModalSummary.textContent =
+    `${data.images.length} image(s) downloaded successfully. Review them, then continue to generate the 3D model.`;
+  scrapeModalThumbs.innerHTML = '';
+  data.images.forEach(img => {
+    const div = document.createElement('div');
+    div.className = 'thumb';
+    div.innerHTML = `<img src="${serverUrl()}${img.url}" title="${(img.title || '').replace(/"/g, '&quot;')}" />`;
+    scrapeModalThumbs.appendChild(div);
+  });
+  scrapeModalBackdrop.classList.add('open');
+}
+
+function hideScrapeModal() {
+  scrapeModalBackdrop.classList.remove('open');
+}
+
+scrapeModalCloseBtn.addEventListener('click', hideScrapeModal);
+scrapeModalCancelBtn.addEventListener('click', () => {
+  hideScrapeModal();
+  setLog('Cancelled — no model generated.');
+});
 
 // ----- Mode toggle -----
 const modeUploadBtn = document.getElementById('mode-upload-btn');
@@ -1019,22 +1204,52 @@ promptGenerateBtn.addEventListener('click', async () => {
   if (!resolvedResult || !resolvedResult.search_query) return;
 
   promptGenerateBtn.disabled = true;
-  promptGenerateBtn.textContent = 'Searching & generating… this can take a minute';
-  setLog('Scraping reference images and running TRELLIS on the remote server…');
-  renderDimensions(null);
+  promptGenerateBtn.textContent = 'Searching for images…';
+  setLog('Scraping reference images…');
 
   try {
-    const res = await fetch(`${serverUrl()}/search_and_generate`, {
+    const res = await fetch(`${serverUrl()}/scrape_images`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         search_query: resolvedResult.search_query,
-        object_name: resolvedResult.object_name || '',
         prefer_shopping_results: !!(resolvedResult.search_filters && resolvedResult.search_filters.prefer_shopping_results),
-        multiimage_algo: promptAlgoSelect.value,
-        auto_dimensions: promptAutoDimCheck.checked,
-        target_dimensions_cm: promptAutoDimCheck.checked ? null : getPromptTargetDimensions(),
       }),
+    });
+    if (!res.ok) throw new Error(`Server returned ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    if (!data.images || data.images.length === 0) throw new Error('No usable images found.');
+
+    pendingScrapeId = data.scrape_id;
+    pendingGenerateParams = {
+      object_name: resolvedResult.object_name || '',
+      multiimage_algo: promptAlgoSelect.value,
+      auto_dimensions: promptAutoDimCheck.checked,
+      target_dimensions_cm: promptAutoDimCheck.checked ? null : getPromptTargetDimensions(),
+    };
+    showScrapeModal(data);
+    setLog(`Found ${data.images.length} image(s) — review and continue when ready.`, 'ok');
+  } catch (err) {
+    setLog(`Failed: ${err.message}`, 'error');
+  } finally {
+    promptGenerateBtn.disabled = false;
+    promptGenerateBtn.textContent = 'Generate 3D Model';
+  }
+});
+
+scrapeModalContinueBtn.addEventListener('click', async () => {
+  if (!pendingScrapeId || !pendingGenerateParams) return;
+  hideScrapeModal();
+
+  setLog('Running TRELLIS on the remote server… this can take a minute');
+  renderDimensions(null);
+  setCurrentJob(null);
+
+  try {
+    const res = await fetch(`${serverUrl()}/generate_from_scrape/${pendingScrapeId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pendingGenerateParams),
     });
 
     if (!res.ok) {
@@ -1053,6 +1268,7 @@ promptGenerateBtn.addEventListener('click', async () => {
     downloadLink.style.display = 'inline-block';
 
     renderDimensions(data.dimensions);
+    setCurrentJob(data.job_id);
 
     const sourceNote = data.used_ai_generated_reference
       ? 'no consistent photos found — used an AI-generated reference image (dimension lookup skipped)'
@@ -1063,8 +1279,8 @@ promptGenerateBtn.addEventListener('click', async () => {
   } catch (err) {
     setLog(`Failed: ${err.message}`, 'error');
   } finally {
-    promptGenerateBtn.disabled = false;
-    promptGenerateBtn.textContent = 'Generate 3D Model';
+    pendingScrapeId = null;
+    pendingGenerateParams = null;
   }
 });
 
@@ -1162,6 +1378,7 @@ runBtn.addEventListener('click', async () => {
   runBtn.textContent = 'Generating… this can take a minute';
   setLog('Uploading images and running TRELLIS on the remote server…');
   renderDimensions(null);
+  setCurrentJob(null);
 
   const form = new FormData();
   files.forEach(f => form.append('images', f));
@@ -1194,6 +1411,7 @@ runBtn.addEventListener('click', async () => {
     downloadLink.style.display = 'inline-block';
 
     renderDimensions(data.dimensions);
+    setCurrentJob(data.job_id);
 
     const scaledNote = data.dimensions_source === 'none'
       ? ' (no real-world scale applied — normalized units only)'
