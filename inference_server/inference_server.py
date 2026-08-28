@@ -25,6 +25,11 @@ import sys
 from pathlib import Path
 from dataclasses import asdict
 from typing import Optional
+import collections
+import logging
+import re
+import threading
+from datetime import datetime, timezone
 
 # Add project root (AssetsAnything) to Python path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -45,6 +50,83 @@ from preprocessing.image_filter import filter_candidates, segment_image
 from preprocessing.image_gen import generate_reference_image
 from postprocessing.scaling import scale_glb_to_real_world
 from PIL import Image
+
+_log_buffer = collections.deque(maxlen=4000)
+_log_counter = 0
+_log_lock = threading.Lock()
+ 
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+
+_EXCLUDE_RE = re.compile(
+    r'"(GET|OPTIONS|POST) /(logs|health|download|search_and_generate|rewrite_prompt'
+    r'|scrape_thumb)'
+)
+
+def _append_log(line: str):
+    global _log_counter
+    line = _ANSI_RE.sub('', line).rstrip()
+    if not line or _EXCLUDE_RE.search(line):
+        return
+ 
+    lower = line.lower()
+    if 'traceback' in lower or 'error' in lower or 'exception' in lower:
+        level = 'ERROR'
+    elif 'warning' in lower:
+        level = 'WARNING'
+    else:
+        level = 'INFO'
+ 
+    with _log_lock:
+        _log_counter += 1
+        _log_buffer.append({
+            "index": _log_counter,
+            "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            "level": level,
+            "message": line,
+        })
+
+class _TeeStream:
+    """
+    Mirrors every write to the ORIGINAL stream (so your terminal is
+    completely unaffected -- you still see exactly what you always did)
+    while also splitting it into lines and feeding them into the log
+    buffer. This is stream-level, not logging-level, so it catches
+    print(), logging output, tqdm's \\r-based progress redraws,
+    warnings.warn(), and uvicorn's own access/error logs -- all of it,
+    regardless of which mechanism produced it.
+    """
+    def __init__(self, original_stream):
+        self.original_stream = original_stream
+        self._partial = ""
+ 
+    def write(self, data):
+        self.original_stream.write(data)
+        self._buffer(data)
+        return len(data)
+ 
+    def flush(self):
+        self.original_stream.flush()
+ 
+    def isatty(self):
+        # Returning False makes libraries that check this (uvicorn, tqdm)
+        # skip ANSI color codes -- slightly plainer terminal output, but
+        # avoids garbled escape sequences showing up in the web console.
+        return False
+ 
+    def _buffer(self, data):
+        self._partial += data
+        # tqdm redraws the same line via \r instead of \n -- treat both as
+        # line breaks so each progress update becomes its own log entry
+        # instead of one giant run-on string.
+        parts = re.split(r'[\r\n]', self._partial)
+        self._partial = parts[-1]
+        for line in parts[:-1]:
+            _append_log(line)
+ 
+ 
+sys.stdout = _TeeStream(sys.stdout)
+sys.stderr = _TeeStream(sys.stderr)
+
 
 app = FastAPI(title="TRELLIS Inference Server")
 
@@ -71,6 +153,28 @@ SCRAPE_DIR = tempfile.mkdtemp(prefix="trellis_scrapes_")
 # /identify_dimensions is called (an SSH-tunnel-only setup won't work for
 # this one endpoint, even though everything else works fine over a tunnel).
 TMP_UPLOAD_DIR = tempfile.mkdtemp(prefix="trellis_tmp_uploads_")
+
+# Holds the result of POST /scrape_images between the two phases of flow B:
+# scrape+filter (phase 1, shown to the user in the client's pop-up modal)
+# and POST /generate_from_scrape/{scrape_id} (phase 2, run once the user
+# hits "Continue"). In-memory only -- a server restart between the two
+# calls means the client gets a clean 404 on phase 2, not stale data.
+#   scrape_id -> {
+#     "image_paths": [str, ...],   # segmented images, saved to SCRAPE_DIR
+#     "titles": [str, ...],
+#     "source_urls": [str, ...],   # original web URLs, for the Lens lookup
+#     "object_name": str,
+#     "used_ai_reference": bool,
+#   }
+SCRAPE_CACHE: dict[str, dict] = {}
+
+# Tracks each generated model's CURRENT bounding box (normalized, or
+# real-world if scaling has been applied) so POST /apply_dimensions/{job_id}
+# can compute a correct scale factor relative to whatever state the model
+# is actually in right now -- whether that's its first-ever scale or a
+# manual override on top of an auto-detected one.
+#   job_id -> {"dimensions": <dict, same shape as compute_bounding_box()>}
+JOB_META: dict[str, dict] = {}
 
 # VLM endpoint used for prompt rewriting/classification — point this at
 # wherever you're serving Qwen2.5-VL (or another OpenAI-compatible VLM).
@@ -127,8 +231,8 @@ def run_trellis_and_export(pil_images: list[Image.Image], multiimage_algo: str =
     glb = postprocessing_utils.to_glb(
         outputs["gaussian"][0],
         outputs["mesh"][0],
-        simplify=0.95,
-        texture_size=1024,
+        simplify=0.85,
+        texture_size=2048,
     )
  
     job_id = str(uuid.uuid4())
@@ -137,6 +241,7 @@ def run_trellis_and_export(pil_images: list[Image.Image], multiimage_algo: str =
     glb.export(out_path)
  
     dimensions = compute_bounding_box(out_path)
+    JOB_META[job_id] = {"dimensions": dimensions}
  
     print(f"[server] done -> {out_path}  bbox={dimensions}")
     return {
@@ -198,7 +303,14 @@ def apply_optional_scaling(result: dict, target_dimensions_cm_json: str, dimensi
     if scaled:
         result["dimensions"] = scaled
         result["dimensions_source"] = dimensions_source
+        JOB_META[result["job_id"]] = {"dimensions": scaled}
 
+@app.get("/logs")
+def get_logs(after: int = 0):
+    with _log_lock:
+        lines = [l for l in _log_buffer if l["index"] > after]
+        next_cursor = _log_buffer[-1]["index"] if _log_buffer else after
+    return {"lines": lines, "next_cursor": next_cursor}
 
 @app.get("/tmp_uploads/{filename}")
 def serve_tmp_upload(filename: str):
@@ -394,6 +506,241 @@ def search_and_generate(req: SearchAndGenerateRequest):
             result["dimensions_source"] = dimensions_source
 
     return result
+
+class ScrapeImagesRequest(BaseModel):
+    search_query: str
+    object_name: str = ""  # from /rewrite_prompt's object_name -- used for CLIP filtering + dimension lookup
+    prefer_shopping_results: bool = False
+
+
+@app.post("/scrape_images")
+def scrape_images(req: ScrapeImagesRequest):
+    """
+    Phase 1 of flow B, split out of the old /search_and_generate so the
+    client can show a pop-up ("images scraped successfully") between
+    scraping and the (slow) TRELLIS run: scrapes candidates, runs the
+    CLIP + color-consistency filter, segments whatever survives -- or,
+    if nothing consistent survives, generates a single AI reference image
+    instead. Caches the result under a scrape_id and returns thumbnail
+    URLs for the client's review modal. Does NOT touch TRELLIS.
+
+    Continue with POST /generate_from_scrape/{scrape_id} once the user
+    has reviewed the images and hit "Continue" in the modal.
+    """
+    engine = "google_images"
+    object_name = req.object_name or req.search_query
+
+    scraped = get_result(req.search_query, engine=engine, language="en")
+    if not scraped:
+        raise HTTPException(
+            422,
+            f"No usable images found for {req.search_query!r}. "
+            "Try a more specific prompt.",
+        )
+
+    scrape_id = str(uuid.uuid4())
+    job_dir = os.path.join(SCRAPE_DIR, scrape_id)
+    downloaded = download_images(scraped, job_dir)
+    if not downloaded:
+        raise HTTPException(422, "Found candidate images but all downloads failed.")
+
+    candidates = []  # list of (pil_image, ScrapedImage)
+    for path, scraped_img in downloaded:
+        try:
+            candidates.append((Image.open(path).convert("RGBA"), scraped_img))
+        except Exception as e:
+            print(f"[server] skipping unreadable image {path}: {e}")
+
+    if not candidates:
+        raise HTTPException(422, "Downloaded files could not be read as images.")
+
+    kept_indices, filtering_ok = filter_candidates([im for im, _ in candidates], object_name)
+
+    if filtering_ok:
+        kept = [candidates[i] for i in kept_indices]
+        pil_images = [segment_image(im) for im, _ in kept]
+        titles = [meta.title for _, meta in kept]
+        source_urls = [meta.url for _, meta in kept]
+        used_ai_reference = False
+    else:
+        if not (IMAGE_GEN_BASE_URL and IMAGE_GEN_MODEL):
+            raise HTTPException(
+                422,
+                f"No consistent, on-topic photos of {object_name!r} were found, and no "
+                "IMAGE_GEN_BASE_URL/IMAGE_GEN_MODEL is configured for the AI-generated "
+                "fallback. Try a more specific prompt, or configure an image-gen backend.",
+            )
+        pil_images = [generate_reference_image(object_name, IMAGE_GEN_BASE_URL, IMAGE_GEN_MODEL)]
+        titles = ["AI-generated reference image"]
+        source_urls = []
+        used_ai_reference = True
+
+    # Persist the segmented images to disk (not just held in memory), so
+    # both the modal's thumbnails (GET /scrape_thumb/...) and the later
+    # /generate_from_scrape call read from a stable place, and a server
+    # restart between the two calls fails loudly (404) instead of silently
+    # serving stale state.
+    kept_dir = os.path.join(job_dir, "_kept")
+    os.makedirs(kept_dir, exist_ok=True)
+    image_paths = []
+    for i, im in enumerate(pil_images):
+        p = os.path.join(kept_dir, f"{i}.png")
+        im.convert("RGB").save(p, format="PNG")
+        image_paths.append(p)
+
+    SCRAPE_CACHE[scrape_id] = {
+        "image_paths": image_paths,
+        "titles": titles,
+        "source_urls": source_urls,
+        "object_name": object_name,
+        "used_ai_reference": used_ai_reference,
+    }
+
+    print(f"[server] scrape {scrape_id}: kept {len(image_paths)} image(s) "
+          f"(ai_reference={used_ai_reference}) for {object_name!r}")
+
+    return {
+        "scrape_id": scrape_id,
+        "used_ai_generated_reference": used_ai_reference,
+        "images": [
+            {"url": f"/scrape_thumb/{scrape_id}/{i}", "title": titles[i]}
+            for i in range(len(image_paths))
+        ],
+    }
+
+
+@app.get("/scrape_thumb/{scrape_id}/{index}")
+def scrape_thumb(scrape_id: str, index: int):
+    """Serves one cached, segmented candidate image for the review modal."""
+    entry = SCRAPE_CACHE.get(scrape_id)
+    if not entry or index < 0 or index >= len(entry["image_paths"]):
+        raise HTTPException(404, "Not found (scrape may have expired or the server restarted).")
+    return FileResponse(entry["image_paths"][index], media_type="image/png")
+
+
+class GenerateFromScrapeRequest(BaseModel):
+    object_name: str = ""
+    multiimage_algo: str = "stochastic"
+    auto_dimensions: bool = True
+    target_dimensions_cm: Optional[dict] = None  # manual override; wins over auto-detection if provided
+
+
+@app.post("/generate_from_scrape/{scrape_id}")
+def generate_from_scrape(scrape_id: str, req: GenerateFromScrapeRequest):
+    """
+    Phase 2 of flow B: loads the images cached by /scrape_images (after
+    the user reviewed them in the modal and hit "Continue"), optionally
+    looks up real-world dimensions via Google Lens + Search (skipped
+    entirely when the AI-generated-reference fallback was used -- there's
+    no real object to identify), runs TRELLIS, and scales. Mirrors
+    /generate's response shape, plus scrape-specific fields.
+    """
+    os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
+    os.environ['SPCONV_ALGO'] = 'native'
+    entry = SCRAPE_CACHE.get(scrape_id)
+    if not entry:
+        raise HTTPException(
+            404, "Scrape not found or expired -- run the search again from the prompt."
+        )
+
+    pil_images = []
+    for p in entry["image_paths"]:
+        try:
+            pil_images.append(Image.open(p).convert("RGBA"))
+        except Exception as e:
+            print(f"[server] skipping unreadable cached image {p}: {e}")
+    if not pil_images:
+        raise HTTPException(422, "Cached scrape images could not be read.")
+
+    object_name = req.object_name or entry["object_name"]
+    used_ai_reference = entry["used_ai_reference"]
+
+    identified_dimensions = None
+    if req.auto_dimensions and not used_ai_reference and SERPAPI_API_KEY and entry["source_urls"]:
+        # Reuse the ORIGINAL web URL of the first kept image (not our own
+        # segmented copy) -- it's already publicly reachable, so this works
+        # even on an SSH-tunnel-only server, unlike /identify_dimensions'
+        # upload-flow path which has to self-host via /tmp_uploads.
+        dim_result = lookup_dimensions_from_url(
+            entry["source_urls"][0], object_name, SERPAPI_API_KEY, VLM_BASE_URL, VLM_MODEL
+        )
+        if dim_result.found:
+            identified_dimensions = asdict(dim_result)
+
+    result = run_trellis_and_export(pil_images, req.multiimage_algo)
+    result["num_images_used"] = len(pil_images)
+    result["used_ai_generated_reference"] = used_ai_reference
+    result["source_titles"] = entry["titles"]
+
+    target_dims = req.target_dimensions_cm
+    dimensions_source = "manual"
+    if not target_dims and identified_dimensions and identified_dimensions.get("found"):
+        target_dims = {
+            "length_cm": identified_dimensions.get("length_cm"),
+            "width_cm": identified_dimensions.get("width_cm"),
+            "height_cm": identified_dimensions.get("height_cm"),
+        }
+        dimensions_source = "auto_detected"
+
+    result["identified_dimensions"] = identified_dimensions
+    result["dimensions_source"] = "none"
+    if target_dims:
+        out_path = os.path.join(OUTPUT_DIR, f"{result['job_id']}.glb")
+        scaled = scale_glb_to_real_world(out_path, result["dimensions"], target_dims)
+        if scaled:
+            result["dimensions"] = scaled
+            result["dimensions_source"] = dimensions_source
+            JOB_META[result["job_id"]] = {"dimensions": scaled}
+
+    return result
+
+
+class ApplyDimensionsRequest(BaseModel):
+    length_cm: float
+    width_cm: float
+    height_cm: float
+
+
+@app.post("/apply_dimensions/{job_id}")
+def apply_dimensions(job_id: str, req: ApplyDimensionsRequest):
+    """
+    Manual resize, available any time after generation -- from either
+    flow, regardless of whether auto-scaling already ran. Rescales the
+    already-exported .glb relative to whatever its CURRENT bounding box
+    is (JOB_META, updated on every generation/scale), so this is correct
+    whether it's the first scale ever applied to this model or a manual
+    override on top of an auto-detected one from earlier in the same job.
+    """
+    out_path = os.path.join(OUTPUT_DIR, f"{job_id}.glb")
+    if not os.path.exists(out_path):
+        raise HTTPException(404, "Model not found (server may have restarted).")
+
+    current_dims = JOB_META.get(job_id, {}).get("dimensions")
+    if current_dims is None:
+        # Lost the in-memory record (e.g. this process restarted) but the
+        # .glb is still on disk from a previous run -- recompute rather
+        # than fail outright.
+        current_dims = compute_bounding_box(out_path)
+
+    target_dims = {
+        "length_cm": req.length_cm,
+        "width_cm": req.width_cm,
+        "height_cm": req.height_cm,
+    }
+    scaled = scale_glb_to_real_world(out_path, current_dims, target_dims, uniform=False)
+    if not scaled:
+        raise HTTPException(500, "Resize failed -- see the server console for details.")
+
+    JOB_META[job_id] = {"dimensions": scaled}
+    print(f"[server] {job_id}: manually resized to "
+          f"{req.length_cm}x{req.width_cm}x{req.height_cm} cm")
+
+    return {
+        "job_id": job_id,
+        "download_url": f"/download/{job_id}",
+        "dimensions": scaled,
+    }
+
 
 def compute_bounding_box(glb_path: str):
     """
