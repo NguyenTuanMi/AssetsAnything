@@ -623,17 +623,21 @@ class GenerateFromScrapeRequest(BaseModel):
     multiimage_algo: str = "stochastic"
     auto_dimensions: bool = True
     target_dimensions_cm: Optional[dict] = None  # manual override; wins over auto-detection if provided
+    selected_indices: Optional[list[int]] = None  # which cached images (by index into /scrape_images'
+    # returned "images" list) to actually reconstruct with. None or empty = use everything that
+    # survived filtering (the old, pre-selection behavior) -- lets existing callers keep working.
 
 
 @app.post("/generate_from_scrape/{scrape_id}")
 def generate_from_scrape(scrape_id: str, req: GenerateFromScrapeRequest):
     """
     Phase 2 of flow B: loads the images cached by /scrape_images (after
-    the user reviewed them in the modal and hit "Continue"), optionally
-    looks up real-world dimensions via Google Lens + Search (skipped
-    entirely when the AI-generated-reference fallback was used -- there's
-    no real object to identify), runs TRELLIS, and scales. Mirrors
-    /generate's response shape, plus scrape-specific fields.
+    the user reviewed them in the modal, optionally deselected some, and
+    hit "Continue"), optionally looks up real-world dimensions via Google
+    Lens + Search (skipped entirely when the AI-generated-reference
+    fallback was used -- there's no real object to identify), runs
+    TRELLIS on only the selected images, and scales. Mirrors /generate's
+    response shape, plus scrape-specific fields.
     """
     os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
     os.environ['SPCONV_ALGO'] = 'native'
@@ -643,26 +647,48 @@ def generate_from_scrape(scrape_id: str, req: GenerateFromScrapeRequest):
             404, "Scrape not found or expired -- run the search again from the prompt."
         )
 
+    all_paths = entry["image_paths"]
+    all_titles = entry["titles"]
+    all_source_urls = entry["source_urls"]
+
+    if req.selected_indices:
+        out_of_range = [i for i in req.selected_indices if i < 0 or i >= len(all_paths)]
+        if out_of_range:
+            raise HTTPException(400, f"selected_indices out of range: {out_of_range}")
+        idxs = req.selected_indices
+    else:
+        idxs = list(range(len(all_paths)))
+
+    if not idxs:
+        raise HTTPException(400, "At least one image must be selected.")
+
+    selected_paths = [all_paths[i] for i in idxs]
+    selected_titles = [all_titles[i] for i in idxs]
+    # entry["source_urls"] is empty for the AI-generated-reference case --
+    # this naturally comes out empty too, which the dimension-lookup guard
+    # below already handles (auto_dimensions is skipped when used_ai_reference).
+    selected_source_urls = [all_source_urls[i] for i in idxs if i < len(all_source_urls)]
+
     pil_images = []
-    for p in entry["image_paths"]:
+    for p in selected_paths:
         try:
             pil_images.append(Image.open(p).convert("RGBA"))
         except Exception as e:
             print(f"[server] skipping unreadable cached image {p}: {e}")
     if not pil_images:
-        raise HTTPException(422, "Cached scrape images could not be read.")
+        raise HTTPException(422, "Selected images could not be read.")
 
     object_name = req.object_name or entry["object_name"]
     used_ai_reference = entry["used_ai_reference"]
 
     identified_dimensions = None
-    if req.auto_dimensions and not used_ai_reference and SERPAPI_API_KEY and entry["source_urls"]:
-        # Reuse the ORIGINAL web URL of the first kept image (not our own
-        # segmented copy) -- it's already publicly reachable, so this works
-        # even on an SSH-tunnel-only server, unlike /identify_dimensions'
-        # upload-flow path which has to self-host via /tmp_uploads.
+    if req.auto_dimensions and not used_ai_reference and SERPAPI_API_KEY and selected_source_urls:
+        # Uses the first SELECTED image's original URL (not necessarily
+        # index 0 of the full cached set) -- if the user deselected the
+        # top-ranked result, the dimension lookup should follow their
+        # choice of which image actually represents the object.
         dim_result = lookup_dimensions_from_url(
-            entry["source_urls"][0], object_name, SERPAPI_API_KEY, VLM_BASE_URL, VLM_MODEL
+            selected_source_urls[0], object_name, SERPAPI_API_KEY, VLM_BASE_URL, VLM_MODEL
         )
         if dim_result.found:
             identified_dimensions = asdict(dim_result)
@@ -670,7 +696,7 @@ def generate_from_scrape(scrape_id: str, req: GenerateFromScrapeRequest):
     result = run_trellis_and_export(pil_images, req.multiimage_algo)
     result["num_images_used"] = len(pil_images)
     result["used_ai_generated_reference"] = used_ai_reference
-    result["source_titles"] = entry["titles"]
+    result["source_titles"] = selected_titles
 
     target_dims = req.target_dimensions_cm
     dimensions_source = "manual"
