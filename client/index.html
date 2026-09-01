@@ -605,6 +605,35 @@
     max-height: 320px;
     overflow-y: auto;
   }
+  #scrape-modal-thumbs .thumb {
+    cursor: pointer;
+    opacity: 0.4;
+    border: 2px solid transparent;
+    transition: opacity 0.15s, border-color 0.15s;
+  }
+  #scrape-modal-thumbs .thumb.selected {
+    opacity: 1;
+    border-color: var(--accent);
+  }
+  #scrape-modal-thumbs .thumb.single {
+    cursor: default;
+  }
+  .thumb-check {
+    position: absolute;
+    top: 4px; right: 4px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #0c1512;
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  #scrape-modal-thumbs .thumb.selected .thumb-check { opacity: 1; }
   .modal-actions {
     display: flex;
     gap: 8px;
@@ -1015,17 +1044,47 @@ const scrapeModalContinueBtn = document.getElementById('scrape-modal-continue-bt
 
 let pendingScrapeId = null;
 let pendingGenerateParams = null;
+let scrapeSelected = new Set(); // indices into the current modal's images array
+
+function renderScrapeModalSummary(total) {
+  const n = scrapeSelected.size;
+  scrapeModalSummary.textContent = total === 1
+    ? `1 image downloaded successfully. Review it, then continue.`
+    : n === total
+      ? `${total} images downloaded successfully. Click any image to exclude it, then continue.`
+      : `${n} of ${total} image(s) selected for reconstruction.`;
+  scrapeModalContinueBtn.disabled = n === 0;
+  scrapeModalContinueBtn.textContent = n === 0 ? 'Select at least one image' : 'Continue to 3D generation';
+}
 
 function showScrapeModal(data) {
-  scrapeModalSummary.textContent =
-    `${data.images.length} image(s) downloaded successfully. Review them, then continue to generate the 3D model.`;
+  const total = data.images.length;
+  scrapeSelected = new Set(data.images.map((_, i) => i)); // default: everything selected
   scrapeModalThumbs.innerHTML = '';
-  data.images.forEach(img => {
+
+  data.images.forEach((img, i) => {
     const div = document.createElement('div');
-    div.className = 'thumb';
-    div.innerHTML = `<img src="${serverUrl()}${img.url}" title="${(img.title || '').replace(/"/g, '&quot;')}" />`;
+    div.className = `thumb selected${total === 1 ? ' single' : ''}`;
+    div.innerHTML =
+      `<img src="${serverUrl()}${img.url}" title="${(img.title || '').replace(/"/g, '&quot;')}" />` +
+      (total === 1 ? '' : '<div class="thumb-check">✓</div>');
+
+    if (total > 1) {
+      div.addEventListener('click', () => {
+        if (scrapeSelected.has(i)) {
+          scrapeSelected.delete(i);
+          div.classList.remove('selected');
+        } else {
+          scrapeSelected.add(i);
+          div.classList.add('selected');
+        }
+        renderScrapeModalSummary(total);
+      });
+    }
     scrapeModalThumbs.appendChild(div);
   });
+
+  renderScrapeModalSummary(total);
   scrapeModalBackdrop.classList.add('open');
 }
 
@@ -1238,7 +1297,7 @@ promptGenerateBtn.addEventListener('click', async () => {
 });
 
 scrapeModalContinueBtn.addEventListener('click', async () => {
-  if (!pendingScrapeId || !pendingGenerateParams) return;
+  if (!pendingScrapeId || !pendingGenerateParams || scrapeSelected.size === 0) return;
   hideScrapeModal();
 
   setLog('Running TRELLIS on the remote server… this can take a minute');
@@ -1249,7 +1308,10 @@ scrapeModalContinueBtn.addEventListener('click', async () => {
     const res = await fetch(`${serverUrl()}/generate_from_scrape/${pendingScrapeId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(pendingGenerateParams),
+      body: JSON.stringify({
+        ...pendingGenerateParams,
+        selected_indices: Array.from(scrapeSelected),
+      }),
     });
 
     if (!res.ok) {
@@ -1281,6 +1343,7 @@ scrapeModalContinueBtn.addEventListener('click', async () => {
   } finally {
     pendingScrapeId = null;
     pendingGenerateParams = null;
+    scrapeSelected = new Set();
   }
 });
 
