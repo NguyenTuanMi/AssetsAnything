@@ -39,6 +39,7 @@ if str(ROOT_DIR) not in sys.path:
 os.environ.setdefault("SPCONV_ALGO", "native")
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -277,7 +278,7 @@ async def generate(
             raise HTTPException(400, f"Could not read image '{f.filename}': {e}")
         pil_images.append(img)
 
-    result = run_trellis_and_export(pil_images, multiimage_algo)
+    result = await run_in_threadpool(run_trellis_and_export, pil_images, multiimage_algo)
     apply_optional_scaling(result, target_dimensions_cm, dimensions_source)
     return result
 
@@ -355,8 +356,8 @@ async def identify_dimensions(
     base_url = PUBLIC_BASE_URL.rstrip("/") if PUBLIC_BASE_URL else str(request.base_url).rstrip("/")
     image_url = f"{base_url}/tmp_uploads/{filename}"
 
-    result = lookup_dimensions_from_url(
-        image_url, object_name_hint, SERPAPI_API_KEY, VLM_BASE_URL, VLM_MODEL
+    result = await run_in_threadpool(
+        lookup_dimensions_from_url, image_url, object_name_hint, SERPAPI_API_KEY, VLM_BASE_URL, VLM_MODEL
     )
     return asdict(result)
 
