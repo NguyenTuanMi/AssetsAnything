@@ -1,6 +1,6 @@
 <h1 align="center">AssetsAnything<br>A general framework for all-purpose 3D Generation</h1>
 
-AssetsAnything is an Image-to-3D framework that allows users to render 3D Assets from images using famous backend models, such as TRELLIS, Pixal3D, etc. Users can decide to use their own images or they can input the prompts describing their wanted object and AssetsAnything will scrape images of that specific object for reconstruction. Currently this framework only supports TRELLIS, but more models are being incorporated in! Stay tune!
+AssetsAnything is an Image-to-3D framework that allows users to render 3D Assets from images using famous backend models, such as TRELLIS, Pixal3D, etc. Users can decide to use their own images or they can input the prompts describing their wanted object and AssetsAnything will scrape images of that specific object for reconstruction. Currently this framework only supports TRELLIS, but more models are being incorporated! Stay tune!
 
 <!-- Features -->
 ## 🌟 Features
@@ -28,12 +28,14 @@ AssetsAnything is an Image-to-3D framework that allows users to render 3D Assets
     ```
 
 2. Install the dependencies:
+    
     Create a new conda environment named `trellis` and install the dependencies:
     ```sh
     . ./setup.sh --new-env --basic --xformers --flash-attn --diffoctreerast --spconv --mipgaussian --kaolin --nvdiffrast
     ```
 
-3. For prompt restructure and images processing, Qwen 2.5 VL is launched locally on a second GPU in a different environment. To install the dependencies for this:
+3. For prompt restructure and images processing, Qwen 2.5 VL is launched locally on a second GPU in a different environment. 
+    
     Create a new conda environment named `qwen_mass_estimator` and install the dependencies:
     ```sh
     conda create --name qwen_mass_estimator python=3.10
@@ -51,6 +53,7 @@ An environment.yaml file is included for reference of installed packages in the 
     ```
 
 2. Add SERP_API key and source the environment:
+    
     Please visit the [SERPAPI](https://serpapi.com/) and create an account to get access to a free tier api key. After that, please paste the key into the .env file, then proceed with steps below: 
     ```sh
     source .env
