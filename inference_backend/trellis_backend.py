@@ -1,11 +1,29 @@
-from .base import BaseReconstructor, ReconstructionResult
+from .base import (
+    BackendCapabilities,
+    BaseReconstructor,
+    ReconstructionRequest,
+    ReconstructionResult,
+)
 
 class TrellisReconstructor(BaseReconstructor):
     name = "trellis"
-    default_conf = {"multiimage_algo": "stochastic", "sparse_steps": 12, "slat_steps": 12}
-    supports_multi_image = True
+    display_name = "TRELLIS"
+    capabilities = BackendCapabilities(
+        supports_single_image=True,
+        supports_multi_image=True,
+        multi_image_modes=("stochastic", "multidiffusion"),
+    )
+    default_conf = {
+        "model_id": "microsoft/TRELLIS-image-large",
+        "multiimage_algo": "stochastic",
+        "simplify": 0.85,
+        "texture_size": 2048,
+    }
 
     def load(self):
+        if self._model is not None:
+            return
+
         import sys, os
         from pathlib import Path
         trellis_root = Path(__file__).resolve().parent.parent / "submodules" / "TRELLIS"
@@ -14,24 +32,29 @@ class TrellisReconstructor(BaseReconstructor):
         os.environ.setdefault("SPCONV_ALGO", "native")
 
         from trellis.pipelines import TrellisImageTo3DPipeline
-        self._model = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
+        self._model = TrellisImageTo3DPipeline.from_pretrained(self.conf["model_id"])
         self._model.cuda()
 
-    def run(self, images, **kwargs) -> ReconstructionResult:
-        from trellis.utils import postprocessing_utils
-        import uuid, os
+    def reconstruct(self, request: ReconstructionRequest) -> ReconstructionResult:
+        if self._model is None:
+            self.load()
 
-        algo = kwargs.get("multiimage_algo", self.conf["multiimage_algo"])
+        from trellis.utils import postprocessing_utils
+
+        images = request.images
+        algo = request.options.get("multiimage_algo", self.conf["multiimage_algo"])
         if len(images) == 1:
             outputs = self._model.run(images[0], seed=1)
         else:
             outputs = self._model.run_multi_image(images, seed=1, mode=algo)
 
         glb = postprocessing_utils.to_glb(outputs["gaussian"][0], outputs["mesh"][0],
-                                           simplify=0.95, texture_size=1024)
-        out_path = f"/tmp/{uuid.uuid4()}.glb"   # OUTPUT_DIR wiring stays in inference_server.py
-        glb.export(out_path)
+                                           simplify=self.conf["simplify"],
+                                           texture_size=self.conf["texture_size"])
+        glb.export(request.output_path)
         return ReconstructionResult(
-            glb_path=out_path, supports_multi_image=(len(images) > 1),
-            backend_name=self.name, raw_meta={"algo": algo},
+            glb_path=request.output_path,
+            backend_name=self.name,
+            num_images_used=len(images),
+            raw_meta={"multiimage_algo": algo},
         )

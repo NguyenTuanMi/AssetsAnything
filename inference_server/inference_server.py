@@ -50,6 +50,8 @@ from preprocessing.dimension_lookup import lookup_dimensions_from_url
 from preprocessing.image_filter import filter_candidates, segment_image
 from preprocessing.image_gen import generate_reference_image
 from postprocessing.scaling import scale_glb_to_real_world
+from inference_backend import get_reconstructor, list_backends
+from inference_backend.base import ReconstructionRequest
 from PIL import Image
 
 _log_buffer = collections.deque(maxlen=4000)
@@ -139,8 +141,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Loaded once at startup, reused across requests (loading the pipeline is slow).
-pipeline = None
+# Loaded lazily and reused across requests. The registry keeps only one model
+# resident because the supported backends share the deployment GPU.
+DEFAULT_BACKEND = os.environ.get("DEFAULT_BACKEND", "trellis")
+_RECONSTRUCTION_LOCK = threading.Lock()
 
 # Where finished .glb files are written, keyed by job id, so the client can fetch them.
 OUTPUT_DIR = tempfile.mkdtemp(prefix="trellis_outputs_")
@@ -195,71 +199,80 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "")
 IMAGE_GEN_BASE_URL = os.environ.get("IMAGE_GEN_BASE_URL", "")
 IMAGE_GEN_MODEL = os.environ.get("IMAGE_GEN_MODEL", "")
 
-def get_pipeline():
-    global pipeline
-    if pipeline is None:
-        from submodules.TRELLIS.trellis.pipelines import TrellisImageTo3DPipeline
-
-        print("[server] loading TRELLIS pipeline (first request only)...")
-        pipeline = TrellisImageTo3DPipeline.from_pretrained("microsoft/TRELLIS-image-large")
-
-        pipeline.cuda()
-        print("[server] pipeline ready.")
-    return pipeline
-
-def run_trellis_and_export(pil_images: list[Image.Image], multiimage_algo: str = "stochastic") -> dict:
+def run_backend_and_export(
+    backend_name: str,
+    pil_images: list[Image.Image],
+    multiimage_algo: str = "stochastic",
+) -> dict:
     """
-    Shared core: runs TRELLIS on a list of PIL images (however they were
-    sourced — direct upload or scraped), exports a .glb, and computes its
-    bounding box. Used by both /generate (uploads) and /search_and_generate
-    (prompt + scraping) so the actual inference logic lives in one place.
+    Shared model-agnostic core used by every generation flow. The selected
+    plugin owns model loading, inference, and GLB export; the server owns job
+    paths, metadata, and the common response shape.
     """
-    pipe = get_pipeline()
- 
-    from submodules.TRELLIS.trellis.utils import postprocessing_utils
-    print(f"[server] running pipeline on {len(pil_images)} images "
-          f"(algo={multiimage_algo})...")
- 
-    if len(pil_images) == 1:
-        outputs = pipe.run(pil_images[0], seed=1)
-    else:
-        outputs = pipe.run_multi_image(
-            pil_images,
-            seed=1,
-            mode=multiimage_algo,
-        )
- 
-    glb = postprocessing_utils.to_glb(
-        outputs["gaussian"][0],
-        outputs["mesh"][0],
-        simplify=0.85,
-        texture_size=2048,
-    )
- 
     job_id = str(uuid.uuid4())
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     out_path = os.path.join(OUTPUT_DIR, f"{job_id}.glb")
-    glb.export(out_path)
- 
-    dimensions = compute_bounding_box(out_path)
+
+    with _RECONSTRUCTION_LOCK:
+        backend = get_reconstructor(backend_name)
+        capabilities = backend.capabilities
+        if not pil_images:
+            raise ValueError("At least one image is required.")
+        if len(pil_images) > 1 and not capabilities.supports_multi_image:
+            raise ValueError(
+                f"Backend {backend_name!r} does not support multiple images."
+            )
+        if (
+            len(pil_images) > 1
+            and multiimage_algo not in capabilities.multi_image_modes
+        ):
+            raise ValueError(
+                f"Backend {backend_name!r} does not support multi-image mode "
+                f"{multiimage_algo!r}."
+            )
+
+        print(f"[server] running {backend_name} on {len(pil_images)} image(s)...")
+        reconstruction = backend.reconstruct(
+            ReconstructionRequest(
+                images=pil_images,
+                output_path=out_path,
+                options={"multiimage_algo": multiimage_algo},
+            )
+        )
+
+    dimensions = compute_bounding_box(reconstruction.glb_path)
     JOB_META[job_id] = {"dimensions": dimensions}
- 
-    print(f"[server] done -> {out_path}  bbox={dimensions}")
+
+    print(f"[server] done -> {reconstruction.glb_path}  bbox={dimensions}")
     return {
         "job_id": job_id,
         "download_url": f"/download/{job_id}",
+        "backend": reconstruction.backend_name,
+        "num_images_used": reconstruction.num_images_used,
         "dimensions": dimensions,
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "pipeline_loaded": pipeline is not None}
+    loaded = [backend["name"] for backend in list_backends() if backend["loaded"]]
+    return {
+        "status": "ok",
+        "default_backend": DEFAULT_BACKEND,
+        "loaded_backends": loaded,
+        "pipeline_loaded": bool(loaded),
+    }
+
+
+@app.get("/backends")
+def backends():
+    return {"backends": list_backends(), "default_backend": DEFAULT_BACKEND}
 
 
 @app.post("/generate")
 async def generate(
     images: list[UploadFile] = File(...),
+    backend: str = Form(DEFAULT_BACKEND),
     multiimage_algo: str = Form("stochastic"),  # "stochastic" or "multidiffusion"
     target_dimensions_cm: str = Form(""),  # JSON string, e.g. {"length_cm":30,"width_cm":20,"height_cm":15}
     dimensions_source: str = Form("manual"),  # "manual" or "auto_detected", just for labeling the response
@@ -278,7 +291,12 @@ async def generate(
             raise HTTPException(400, f"Could not read image '{f.filename}': {e}")
         pil_images.append(img)
 
-    result = await run_in_threadpool(run_trellis_and_export, pil_images, multiimage_algo)
+    try:
+        result = await run_in_threadpool(
+            run_backend_and_export, backend, pil_images, multiimage_algo
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     apply_optional_scaling(result, target_dimensions_cm, dimensions_source)
     return result
 
@@ -399,6 +417,7 @@ def rewrite_prompt_endpoint(req: RewritePromptRequest):
  
  
 class SearchAndGenerateRequest(BaseModel):
+    backend: str = DEFAULT_BACKEND
     search_query: str
     object_name: str = ""  # from /rewrite_prompt's object_name -- used for CLIP filtering + dimension lookup
     prefer_shopping_results: bool = False
@@ -478,7 +497,10 @@ def search_and_generate(req: SearchAndGenerateRequest):
             )
         pil_images = [generate_reference_image(object_name, IMAGE_GEN_BASE_URL, IMAGE_GEN_MODEL)]
 
-    result = run_trellis_and_export(pil_images, req.multiimage_algo)
+    try:
+        result = run_backend_and_export(req.backend, pil_images, req.multiimage_algo)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     result["num_images_used"] = len(pil_images)
     result["used_ai_generated_reference"] = used_ai_reference
     result["source_titles"] = (
@@ -620,6 +642,7 @@ def scrape_thumb(scrape_id: str, index: int):
 
 
 class GenerateFromScrapeRequest(BaseModel):
+    backend: str = DEFAULT_BACKEND
     object_name: str = ""
     multiimage_algo: str = "stochastic"
     auto_dimensions: bool = True
@@ -694,7 +717,10 @@ def generate_from_scrape(scrape_id: str, req: GenerateFromScrapeRequest):
         if dim_result.found:
             identified_dimensions = asdict(dim_result)
 
-    result = run_trellis_and_export(pil_images, req.multiimage_algo)
+    try:
+        result = run_backend_and_export(req.backend, pil_images, req.multiimage_algo)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     result["num_images_used"] = len(pil_images)
     result["used_ai_generated_reference"] = used_ai_reference
     result["source_titles"] = selected_titles

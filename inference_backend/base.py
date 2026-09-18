@@ -1,20 +1,40 @@
-from dataclasses import dataclass
-from PIL import Image
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from PIL import Image
+
+
+@dataclass(frozen=True)
+class BackendCapabilities:
+    supports_single_image: bool = True
+    supports_multi_image: bool = False
+    multi_image_modes: tuple[str, ...] = ()
+
+
+@dataclass
+class ReconstructionRequest:
+    images: list[Image.Image]
+    output_path: str
+    options: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class ReconstructionResult:
     glb_path: str
-    supports_multi_image: bool   # did this run actually fuse multiple views, or just use one?
     backend_name: str
-    raw_meta: dict               # backend-specific extras (sampler steps used, etc.) — never load-bearing outside the backend
+    num_images_used: int
+    raw_meta: dict[str, Any] = field(default_factory=dict)
 
 class BaseReconstructor(ABC):
-    """One instance = one loaded model, resident on the GPU until unload()."""
+    """One instance represents one lazily loaded model."""
 
-    name: str                # unique registry key, e.g. "trellis", "pixel3d"
+    name: str
+    display_name: str
+    capabilities = BackendCapabilities()
     default_conf: dict = {}
-    supports_single_image: bool = True
-    supports_multi_image: bool = False
 
     def __init__(self, conf: dict | None = None):
         self.conf = {**self.default_conf, **(conf or {})}
@@ -27,7 +47,7 @@ class BaseReconstructor(ABC):
         can't take down server startup for every other backend."""
 
     @abstractmethod
-    def run(self, images: list[Image.Image], **kwargs) -> ReconstructionResult:
+    def reconstruct(self, request: ReconstructionRequest) -> ReconstructionResult:
         ...
 
     def unload(self) -> None:
