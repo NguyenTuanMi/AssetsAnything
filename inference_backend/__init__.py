@@ -1,8 +1,10 @@
 from .base import BaseReconstructor, ReconstructionRequest, ReconstructionResult
+from .pixal3d_backend import Pixal3DReconstructor
 from .trellis_backend import TrellisReconstructor
 
 REGISTRY: dict[str, type] = {
     "trellis": TrellisReconstructor,
+    "pixal3d": Pixal3DReconstructor,
 }
 
 _LOADED: dict[str, BaseReconstructor] = {}
