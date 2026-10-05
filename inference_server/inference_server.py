@@ -277,8 +277,9 @@ async def generate(
     target_dimensions_cm: str = Form(""),  # JSON string, e.g. {"length_cm":30,"width_cm":20,"height_cm":15}
     dimensions_source: str = Form("manual"),  # "manual" or "auto_detected", just for labeling the response
 ):
-    os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
-    os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
+    if backend == "trellis":
+        os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
+        os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto'
     if not images:
         raise HTTPException(400, "No images uploaded.")
 
@@ -442,9 +443,6 @@ def search_and_generate(req: SearchAndGenerateRequest):
       -> run TRELLIS -> optionally scale to real-world size -> export.
     """
     engine = "google_images"
-
-    os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
-    os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto'
 
     object_name = req.object_name or req.search_query
 
@@ -663,8 +661,6 @@ def generate_from_scrape(scrape_id: str, req: GenerateFromScrapeRequest):
     TRELLIS on only the selected images, and scales. Mirrors /generate's
     response shape, plus scrape-specific fields.
     """
-    os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
-    os.environ['SPCONV_ALGO'] = 'native'
     entry = SCRAPE_CACHE.get(scrape_id)
     if not entry:
         raise HTTPException(

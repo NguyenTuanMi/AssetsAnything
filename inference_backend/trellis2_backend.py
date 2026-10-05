@@ -4,21 +4,17 @@ from .base import (
     ReconstructionRequest,
     ReconstructionResult,
 )
-import o_voxel
 
-class TrellisReconstructor(BaseReconstructor):
+
+class Trellis2Reconstructor(BaseReconstructor):
     name = "trellis2"
     display_name = "TRELLIS2"
     capabilities = BackendCapabilities(
         supports_single_image=True,
-        supports_multi_image=True,
-        multi_image_modes=("stochastic", "multidiffusion"),
+        supports_multi_image=False,
     )
     default_conf = {
         "model_id": "microsoft/TRELLIS.2-4B",
-        "multiimage_algo": "stochastic",
-        "simplify": 0.85,
-        "texture_size": 2048,
     }
 
     def load(self):
@@ -39,14 +35,13 @@ class TrellisReconstructor(BaseReconstructor):
         if self._model is None:
             self.load()
 
-        from trellis2.utils import render_utils
+        import o_voxel
 
         images = request.images
-        algo = request.options.get("multiimage_algo", self.conf["multiimage_algo"])
-        if len(images) == 1:
-            mesh = self._model.run(images[0])[0]
-        else:
-            mesh = self._model.run_multi_image(images, seed=1, mode=algo)
+        if len(images) != 1:
+            raise ValueError("TRELLIS.2 currently supports exactly one image.")
+
+        mesh = self._model.run(images[0], seed=1)[0]
 
         mesh.simplify(16777216)
         glb = o_voxel.postprocess.to_glb(
@@ -64,10 +59,10 @@ class TrellisReconstructor(BaseReconstructor):
             remesh_project      =   0,
             verbose             =   True
         )
-        glb.export(request.output_path)
+        glb.export(request.output_path, extension_webp=True)
         return ReconstructionResult(
             glb_path=request.output_path,
             backend_name=self.name,
             num_images_used=len(images),
-            raw_meta={"multiimage_algo": algo},
+            raw_meta={"pipeline": "Trellis2ImageTo3DPipeline"},
         )
