@@ -29,6 +29,7 @@ import collections
 import logging
 import re
 import threading
+import atexit
 from datetime import datetime, timezone
 
 # Add project root (AssetsAnything) to Python path
@@ -50,8 +51,9 @@ from preprocessing.dimension_lookup import lookup_dimensions_from_url
 from preprocessing.image_filter import filter_candidates, segment_image
 from preprocessing.image_gen import generate_reference_image
 from postprocessing.scaling import scale_glb_to_real_world
-from inference_backend import get_reconstructor, list_backends
+from inference_backend import REGISTRY, list_backends
 from inference_backend.base import ReconstructionRequest
+from inference_backend.supervisor import ModelSupervisor
 from PIL import Image
 
 _log_buffer = collections.deque(maxlen=4000)
@@ -145,6 +147,8 @@ app.add_middleware(
 # resident because the supported backends share the deployment GPU.
 DEFAULT_BACKEND = os.environ.get("DEFAULT_BACKEND", "trellis")
 _RECONSTRUCTION_LOCK = threading.Lock()
+MODEL_SUPERVISOR = ModelSupervisor(ROOT_DIR)
+atexit.register(MODEL_SUPERVISOR.shutdown)
 
 # Where finished .glb files are written, keyed by job id, so the client can fetch them.
 OUTPUT_DIR = tempfile.mkdtemp(prefix="trellis_outputs_")
@@ -214,8 +218,12 @@ def run_backend_and_export(
     out_path = os.path.join(OUTPUT_DIR, f"{job_id}.glb")
 
     with _RECONSTRUCTION_LOCK:
-        backend = get_reconstructor(backend_name)
-        capabilities = backend.capabilities
+        backend_type = REGISTRY.get(backend_name)
+        if backend_type is None:
+            raise ValueError(
+                f"Unknown backend {backend_name!r}. Available: {sorted(REGISTRY)}"
+            )
+        capabilities = backend_type.capabilities
         if not pil_images:
             raise ValueError("At least one image is required.")
         if len(pil_images) > 1 and not capabilities.supports_multi_image:
@@ -232,12 +240,14 @@ def run_backend_and_export(
             )
 
         print(f"[server] running {backend_name} on {len(pil_images)} image(s)...")
-        reconstruction = backend.reconstruct(
+        reconstruction = MODEL_SUPERVISOR.reconstruct(
+            backend_name,
             ReconstructionRequest(
                 images=pil_images,
                 output_path=out_path,
                 options={"multiimage_algo": multiimage_algo},
-            )
+            ),
+            capabilities,
         )
 
     dimensions = compute_bounding_box(reconstruction.glb_path)
@@ -255,7 +265,8 @@ def run_backend_and_export(
 
 @app.get("/health")
 def health():
-    loaded = [backend["name"] for backend in list_backends() if backend["loaded"]]
+    active = MODEL_SUPERVISOR.active_name
+    loaded = [active] if active else []
     return {
         "status": "ok",
         "default_backend": DEFAULT_BACKEND,
@@ -266,7 +277,11 @@ def health():
 
 @app.get("/backends")
 def backends():
-    return {"backends": list_backends(), "default_backend": DEFAULT_BACKEND}
+    active = MODEL_SUPERVISOR.active_name
+    backend_list = list_backends()
+    for backend in backend_list:
+        backend["loaded"] = backend["name"] == active
+    return {"backends": backend_list, "default_backend": DEFAULT_BACKEND}
 
 
 @app.post("/generate")

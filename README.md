@@ -69,6 +69,21 @@ An environment.yaml file is included for reference of installed packages in the 
     ./scripts/deploy/launch_backend.sh
     ```
 
+    The management API now starts model workers on demand and keeps only one
+    worker process active on the configured GPU. Set worker interpreters when
+    models use separate Pixi or conda environments; otherwise the current
+    Python interpreter is used:
+    ```sh
+    export TRELLIS_WORKER_PYTHON=/path/to/trellis/.pixi/envs/default/bin/python
+    export TRELLIS2_WORKER_PYTHON=/path/to/trellis2/.pixi/envs/default/bin/python
+    export PIXAL3D_WORKER_PYTHON=/path/to/pixal3d/.pixi/envs/default/bin/python
+    ```
+
+    `TRELLIS_WORKER_PORT`, `TRELLIS2_WORKER_PORT`, and `PIXAL3D_WORKER_PORT`
+    optionally override the local worker ports. The supervisor terminates the
+    active worker's process group and waits for it to exit before starting a
+    different backend.
+
 5. On another terminal, launch the UI: 
     ```sh
     cd client && python3 -m http.server 5500

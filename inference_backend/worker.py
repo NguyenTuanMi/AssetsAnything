@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from PIL import Image
 
 from . import get_reconstructor, list_backends
@@ -23,7 +23,7 @@ from .base import ReconstructionRequest
 class GenerateRequest(BaseModel):
     input_paths: list[str]
     output_path: str
-    options: dict = {}
+    options: dict = Field(default_factory=dict)
 
 
 def create_app(backend_name: str) -> FastAPI:
